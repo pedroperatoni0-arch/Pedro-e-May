@@ -11,7 +11,7 @@ export type CoupleEventListener = (event: { type: CoupleEventType; payload: any 
 
 /**
  * Optimizes the SDP to configure Opus codec for crystal clear HD voice quality (WhatsApp/Discord grade)
- * - 48 kbps HD Speech Bitrate with CBR for minimal jitter delay
+ * - 32 kbps speech bitrate with 10ms packets for lower conversational latency
  * - Inband Forward Error Correction (FEC) for zero packet-loss stutter on 4G/5G/WiFi
  * - 48,000 Hz Wideband Sample Rate
  * - Mono Voice Pipeline to eliminate phase cancellation and acoustic artifacts
@@ -32,7 +32,7 @@ function optimizeOpusSdp(rawSdp: string): string {
 
   if (!opusPt) return rawSdp;
 
-  const opusParams = `a=fmtp:${opusPt} minptime=10;ptime=20;maxaveragebitrate=48000;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=0;maxplaybackrate=48000;sprop-maxcapturerate=48000;cbr=1`;
+  const opusParams = `a=fmtp:${opusPt} minptime=10;ptime=10;maxaveragebitrate=32000;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;maxplaybackrate=48000;sprop-maxcapturerate=48000;cbr=1`;
 
   let hasFmtp = false;
   const newLines = lines.map((line) => {
@@ -61,7 +61,7 @@ const HIGH_QUALITY_AUDIO_CONSTRAINTS: MediaStreamConstraints = {
     channelCount: { ideal: 1 },
     sampleRate: { ideal: 48000 },
     latency: { ideal: 0.01, max: 0.04 },
-  },
+  } as MediaTrackConstraints,
   video: false,
 };
 
@@ -102,6 +102,11 @@ class CallManager {
   private reconnectAttempts = 0;
   private maxReconnectDelay = 10000;
   private pendingSignals: Array<{ type: string; payload: any }> = [];
+  private iceRestartTimer: NodeJS.Timeout | null = null;
+  private connectionRecoveryAttempts = 0;
+  private isRestartingIce = false;
+  private processedRemoteOfferSdp: string | null = null;
+  private processingRemoteOfferSdp: string | null = null;
 
   constructor() {
     this.initAudioElement();
@@ -787,8 +792,14 @@ class CallManager {
       }
 
       // 2. Call Offer received by callee
-      if (callDoc.offer && !this.session.isOutgoing && (this.session.state === 'CONNECTING' || this.session.state === 'RINGING')) {
-        if (!this.peerConnection || !this.peerConnection.remoteDescription) {
+      if (callDoc.offer && !this.session.isOutgoing && (
+        this.session.state === 'CONNECTING' ||
+        this.session.state === 'CONNECTED' ||
+        this.session.state === 'RINGING'
+      )) {
+        const offerSdp = callDoc.offer.sdp || '';
+        const isNewOffer = offerSdp && offerSdp !== this.processedRemoteOfferSdp;
+        if (isNewOffer) {
           if (this.session.state === 'RINGING') {
             soundManager.stopIncomingRing();
             this.updateState({ state: 'CONNECTING' });
@@ -916,7 +927,7 @@ class CallManager {
       });
     }
 
-    // Bidirectional remote audio reception with zero artificial buffer latency
+    // Bidirectional remote audio reception with the smallest supported playout buffer.
     pc.ontrack = (event) => {
       console.log('[CallManager] Remote audio track received:', event.track.id, 'readyState:', event.track.readyState);
       
@@ -940,6 +951,9 @@ class CallManager {
         audioEl.volume = 1.0;
         audioEl.muted = !this.session.isSpeakerOn;
         audioEl.playbackRate = 1.0;
+        audioEl.autoplay = true;
+        audioEl.preload = 'none';
+        audioEl.setAttribute('playsinline', '');
 
         const playAudioStream = () => {
           if (audioEl && audioEl.srcObject) {
@@ -986,31 +1000,30 @@ class CallManager {
     pc.onconnectionstatechange = () => {
       console.log('[CallManager] RTCPeerConnection connectionState:', pc.connectionState);
       if (pc.connectionState === 'connected') {
+        this.connectionRecoveryAttempts = 0;
+        this.clearIceRestartTimer();
         this.handleCallConnected();
       } else if (pc.connectionState === 'disconnected') {
-        console.log('[CallManager] Connection disconnected temporarily, waiting for self-recovery...');
+        console.log('[CallManager] Connection disconnected temporarily, scheduling ICE recovery...');
+        this.scheduleIceRestart('connection_disconnected');
       } else if (pc.connectionState === 'failed') {
-        console.log('[CallManager] Connection failed, attempting ICE restart...');
-        if (typeof pc.restartIce === 'function') {
-          try {
-            pc.restartIce();
-          } catch (e) {}
-        }
+        console.log('[CallManager] Connection failed, renegotiating ICE...');
+        this.scheduleIceRestart('connection_failed');
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       console.log('[CallManager] RTCPeerConnection iceConnectionState:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        this.connectionRecoveryAttempts = 0;
+        this.clearIceRestartTimer();
         this.handleCallConnected();
       } else if (pc.iceConnectionState === 'disconnected') {
-        console.log('[CallManager] ICE disconnected temporarily, maintaining call...');
+        console.log('[CallManager] ICE disconnected temporarily, scheduling recovery...');
+        this.scheduleIceRestart('ice_disconnected');
       } else if (pc.iceConnectionState === 'failed') {
-        if (typeof pc.restartIce === 'function') {
-          try {
-            pc.restartIce();
-          } catch (e) {}
-        }
+        console.log('[CallManager] ICE failed, renegotiating ICE...');
+        this.scheduleIceRestart('ice_failed');
       }
     };
 
@@ -1076,8 +1089,135 @@ class CallManager {
     }
   }
 
+  /**
+   * Recover a mobile call whose NAT route disappeared after being connected.
+   * restartIce() alone only marks the next offer for an ICE restart; it does
+   * not send that offer. Renegotiating here keeps both phones on the same
+   * transport after a Wi-Fi/mobile handoff or a stale UDP mapping.
+   */
+  private scheduleIceRestart(reason: string) {
+    if (
+      !this.session.callId ||
+      !this.peerConnection ||
+      this.session.state !== 'CONNECTED' ||
+      this.iceRestartTimer ||
+      this.isRestartingIce
+    ) {
+      return;
+    }
+
+    const callId = this.session.callId;
+    const retryDelay = Math.min(1500 * Math.pow(1.5, this.connectionRecoveryAttempts), 10000);
+    this.iceRestartTimer = setTimeout(async () => {
+      this.iceRestartTimer = null;
+
+      if (
+        !this.session.callId ||
+        this.session.callId !== callId ||
+        this.session.state !== 'CONNECTED' ||
+        !this.peerConnection
+      ) {
+        return;
+      }
+
+      const pc = this.peerConnection;
+      if (pc.connectionState === 'connected' && (
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed'
+      )) {
+        this.connectionRecoveryAttempts = 0;
+        return;
+      }
+
+      this.connectionRecoveryAttempts += 1;
+      console.log(`[CallManager] ICE recovery attempt ${this.connectionRecoveryAttempts} (${reason})`);
+      await this.restartIceAndRenegotiate();
+
+      if (
+        this.session.callId === callId &&
+        this.session.state === 'CONNECTED' &&
+        this.peerConnection &&
+        this.peerConnection.iceConnectionState !== 'connected' &&
+        this.peerConnection.iceConnectionState !== 'completed'
+      ) {
+        this.scheduleIceRestart('retry');
+      }
+    }, retryDelay);
+  }
+
+  private clearIceRestartTimer() {
+    if (this.iceRestartTimer) {
+      clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+    }
+  }
+
+  private async restartIceAndRenegotiate() {
+    if (
+      this.isRestartingIce ||
+      !this.peerConnection ||
+      !this.session.callId ||
+      !this.currentUser ||
+      this.session.state !== 'CONNECTED'
+    ) {
+      return;
+    }
+
+    const pc = this.peerConnection;
+    const callId = this.session.callId;
+    this.isRestartingIce = true;
+
+    try {
+      if (typeof pc.restartIce === 'function') {
+        pc.restartIce();
+      }
+
+      const offer = await pc.createOffer({
+        iceRestart: true,
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false,
+      });
+      const enhancedSdp = optimizeOpusSdp(offer.sdp || '');
+      const enhancedOffer: RTCSessionDescriptionInit = {
+        type: offer.type,
+        sdp: enhancedSdp,
+      };
+
+      await pc.setLocalDescription(enhancedOffer);
+      const sdpPayload = { type: enhancedOffer.type, sdp: enhancedOffer.sdp };
+
+      // Both channels are intentional: WebSocket is immediate and Firestore
+      // allows the repair to complete after a socket reconnection.
+      FirebaseService.updateCallDoc(callId, {
+        offer: sdpPayload,
+        status: 'connecting',
+        iceRestartedAt: new Date().toISOString(),
+      }).catch(() => {});
+
+      this.sendSignal('call:offer', {
+        callId,
+        sdp: enhancedOffer,
+        targetUserId: this.session.partner?.id,
+      });
+    } catch (err) {
+      console.warn('[CallManager] ICE renegotiation attempt failed:', err);
+    } finally {
+      this.isRestartingIce = false;
+    }
+  }
+
   private async handleReceivedOffer(sdp: RTCSessionDescriptionInit) {
     try {
+      const offerSdp = sdp?.sdp || '';
+      if (
+        offerSdp &&
+        (offerSdp === this.processedRemoteOfferSdp ||
+          offerSdp === this.processingRemoteOfferSdp)
+      ) {
+        return;
+      }
+      this.processingRemoteOfferSdp = offerSdp || null;
+
       let pc = this.peerConnection;
       if (!pc || pc.signalingState === 'closed') {
         pc = this.createPeerConnection();
@@ -1091,6 +1231,7 @@ class CallManager {
       }
 
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      this.processedRemoteOfferSdp = offerSdp;
       await this.processPendingIceCandidates();
 
       const answer = await pc.createAnswer();
@@ -1124,6 +1265,8 @@ class CallManager {
     } catch (err) {
       console.error('[CallManager] Error handling SDP offer:', err);
       this.handleCallFailed('Erro ao responder oferta de áudio.');
+    } finally {
+      this.processingRemoteOfferSdp = null;
     }
   }
 
@@ -1201,6 +1344,11 @@ class CallManager {
 
   private cleanupMediaAndPeer() {
     this.stopDurationTimer();
+    this.clearIceRestartTimer();
+    this.connectionRecoveryAttempts = 0;
+    this.isRestartingIce = false;
+    this.processedRemoteOfferSdp = null;
+    this.processingRemoteOfferSdp = null;
 
     if (this.ringingTimeoutTimer) {
       clearTimeout(this.ringingTimeoutTimer);
