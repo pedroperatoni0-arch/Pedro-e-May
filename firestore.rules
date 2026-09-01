@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if true; // Public for couple ID search and partner lookup
+      allow create: if true; // Initial registration
+      allow update, delete: if true; // Profile update & syncing
+    }
+
+    // Tasks Collection
+    match /tasks/{taskId} {
+      allow read, write: if true;
+    }
+
+    // Chat Messages Collection
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Arena History Collection
+    match /arenaHistory/{matchId} {
+      allow read, write: if true;
+    }
+
+    // Real-Time Voice Calls Signaling
+    match /calls/{callId} {
+      allow read, write: if true;
+
+      match /{subcollection}/{docId} {
+        allow read, write: if true;
+      }
+    }
+
+    // Test / Diagnostic collection
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+  }
+}

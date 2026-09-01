@@ -1,0 +1,6 @@
+{
+  "name": "DuoQuest - Rotina & Arena do Casal",
+  "description": "Aplicativo para casais manterem suas rotinas com a Arena de disputas diárias (0 a 100 pontos), evolução de nível pessoal, temporadas semanais e chat.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account and profile information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique user ID matching auth UID" },
+        "username": { "type": "string", "description": "Display name of the user" },
+        "email": { "type": "string", "format": "email", "description": "User email address" },
+        "personalId": { "type": "string", "description": "Public identifier for couple linking (e.g. 72QX-7KJ9)" },
+        "personalIdClean": { "type": "string", "description": "Normalized uppercase alphanumeric personal ID for fast querying" },
+        "avatar": { "type": "string", "description": "Avatar identifier or URL" },
+        "partnerId": { "type": "string", "description": "User ID of linked partner or empty" },
+        "partnerPersonalId": { "type": "string", "description": "Public ID of linked partner" },
+        "partnerName": { "type": "string", "description": "Display name of linked partner" },
+        "xp": { "type": "number", "description": "Current user XP" },
+        "level": { "type": "number", "description": "Current user level" },
+        "streakDays": { "type": "number", "description": "Consecutive days streak" },
+        "routineXpClaimedDates": { "type": "string", "description": "Comma-separated or JSON list of dates XP was claimed" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of account creation" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" }
+      },
+      "required": ["id", "username", "email", "personalId", "personalIdClean"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Routine task item for a user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique task ID" },
+        "userId": { "type": "string", "description": "Owner user ID" },
+        "title": { "type": "string", "description": "Task name/title" },
+        "category": { "type": "string", "description": "Task category (health, study, fitness, etc.)" },
+        "period": { "type": "string", "description": "Time of day (morning, afternoon, night)" },
+        "xpReward": { "type": "number", "description": "XP rewarded on completion" },
+        "icon": { "type": "string", "description": "Icon name" },
+        "days": { "type": "string", "description": "JSON array of active days" },
+        "completedDates": { "type": "string", "description": "JSON array of dates completed" },
+        "failedDates": { "type": "string", "description": "JSON array of dates failed" },
+        "createdAt": { "type": "string", "description": "Creation date" }
+      },
+      "required": ["id", "userId", "title"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Direct message between coupled users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique message ID" },
+        "senderId": { "type": "string", "description": "User ID of message sender" },
+        "receiverId": { "type": "string", "description": "User ID of message receiver" },
+        "text": { "type": "string", "description": "Message body" },
+        "timestamp": { "type": "string", "description": "ISO timestamp" },
+        "read": { "type": "boolean", "description": "Whether message has been read" }
+      },
+      "required": ["id", "senderId", "receiverId", "text"]
+    },
+    "ArenaHistory": {
+      "title": "ArenaHistory",
+      "description": "Daily arena match result between partners",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Date string / match ID (e.g. 2026-08-31)" },
+        "date": { "type": "string", "description": "Match date" },
+        "userAId": { "type": "string", "description": "First partner ID" },
+        "userBId": { "type": "string", "description": "Second partner ID" },
+        "scoreA": { "type": "number", "description": "Score achieved by partner A (0-100)" },
+        "scoreB": { "type": "number", "description": "Score achieved by partner B (0-100)" },
+        "winnerId": { "type": "string", "description": "Winner user ID or 'draw' or 'coop'" }
+      },
+      "required": ["id", "date", "userAId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and account data"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Tasks created and tracked by users"
+    },
+    "/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Chat messages between partners"
+    },
+    "/arenaHistory/{matchId}": {
+      "schema": "ArenaHistory",
+      "description": "Arena match history"
+    }
+  }
+}

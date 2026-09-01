@@ -1,0 +1,172 @@
+[
+  {
+    "title": "Acordar cedo e beber 500ml de água",
+    "time": "07:30",
+    "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "category": "health",
+    "xpReward": 35,
+    "completedDates": [
+      "2026-08-31"
+    ],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Hidratação logo ao despertar! 💧",
+    "id": "task_user_1788139835362_afb3fd30_0_1788139835363",
+    "userId": "user_1788139835362_afb3fd30",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Treino ou caminhada do dia",
+    "time": "09:00",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "category": "fitness",
+    "xpReward": 50,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Manter a constância nos treinos! 💪",
+    "id": "task_user_1788139835362_afb3fd30_1_1788139835363",
+    "userId": "user_1788139835362_afb3fd30",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Estudo ou foco profissional (45 min)",
+    "time": "14:00",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "category": "study",
+    "xpReward": 45,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Sem distrações no celular 📚",
+    "id": "task_user_1788139835362_afb3fd30_2_1788139835363",
+    "userId": "user_1788139835362_afb3fd30",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Mensagem de carinho ou momento a dois",
+    "time": "19:30",
+    "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "category": "love",
+    "xpReward": 40,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Cuidar do nosso amor todos os dias ❤️",
+    "id": "task_user_1788139835362_afb3fd30_3_1788139835363",
+    "userId": "user_1788139835362_afb3fd30",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Acordar cedo e beber 500ml de água",
+    "time": "07:30",
+    "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "category": "health",
+    "xpReward": 35,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Hidratação logo ao despertar! 💧",
+    "id": "task_user_1788139835438_c24b9f21_0_1788139835439",
+    "userId": "user_1788139835438_c24b9f21",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Treino ou caminhada do dia",
+    "time": "09:00",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "category": "fitness",
+    "xpReward": 50,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Manter a constância nos treinos! 💪",
+    "id": "task_user_1788139835438_c24b9f21_1_1788139835439",
+    "userId": "user_1788139835438_c24b9f21",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Estudo ou foco profissional (45 min)",
+    "time": "14:00",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "category": "study",
+    "xpReward": 45,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Sem distrações no celular 📚",
+    "id": "task_user_1788139835438_c24b9f21_2_1788139835439",
+    "userId": "user_1788139835438_c24b9f21",
+    "createdAt": "2026-08-31"
+  },
+  {
+    "title": "Mensagem de carinho ou momento a dois",
+    "time": "19:30",
+    "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "category": "love",
+    "xpReward": 40,
+    "completedDates": [],
+    "failedDates": [],
+    "isRecurring": true,
+    "notes": "Cuidar do nosso amor todos os dias ❤️",
+    "id": "task_user_1788139835438_c24b9f21_3_1788139835439",
+    "userId": "user_1788139835438_c24b9f21",
+    "createdAt": "2026-08-31"
+  }
+]
