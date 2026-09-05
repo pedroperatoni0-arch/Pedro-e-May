@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RealCallSession } from '../../types';
 import { callManager } from '../../services/callManager';
@@ -10,9 +10,10 @@ import {
   Volume2,
   VolumeX,
   Heart,
-  Sparkles,
   AlertCircle,
   Radio,
+  Video,
+  VideoOff,
 } from 'lucide-react';
 
 interface RealVoiceCallModalProps {
@@ -22,6 +23,7 @@ interface RealVoiceCallModalProps {
   onSpeakerToggle?: () => void;
   onAcceptCall?: () => void;
   onRejectCall?: () => void;
+  onCameraToggle?: () => void;
 }
 
 export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
@@ -31,7 +33,50 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
   onSpeakerToggle,
   onAcceptCall,
   onRejectCall,
+  onCameraToggle,
 }) => {
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+
+  // Subscribe to stream updates from callManager
+  useEffect(() => {
+    const unsub = callManager.subscribeStreams((local, remote) => {
+      setLocalStream(local);
+      setRemoteStream(remote);
+    });
+    return unsub;
+  }, []);
+
+  // Attach streams to video elements
+  useEffect(() => {
+    if (remoteVideoRef.current) {
+      if (remoteStream && remoteStream.getVideoTracks().length > 0) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        remoteVideoRef.current.play().catch(() => {});
+      } else {
+        remoteVideoRef.current.srcObject = null;
+      }
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    if (localVideoRef.current) {
+      if (localStream && session.isCameraOn) {
+        const videoTracks = localStream.getVideoTracks();
+        if (videoTracks.length > 0) {
+          localVideoRef.current.srcObject = localStream;
+          localVideoRef.current.play().catch(() => {});
+        } else {
+          localVideoRef.current.srcObject = null;
+        }
+      } else {
+        localVideoRef.current.srcObject = null;
+      }
+    }
+  }, [localStream, session.isCameraOn]);
+
   if (session.state === 'IDLE') return null;
 
   const handleEnd = onEndCall || (() => callManager.endCall());
@@ -40,6 +85,7 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
   const handleSpeaker = onSpeakerToggle || (() => callManager.toggleSpeaker());
   const handleAccept = onAcceptCall || (() => callManager.acceptCall());
   const handleReject = onRejectCall || (() => callManager.rejectCall());
+  const handleCamera = onCameraToggle || (() => callManager.toggleCamera());
 
   const formatDuration = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -55,7 +101,12 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
     session.state === 'ENDED' ||
     session.state === 'REJECTED' ||
     session.state === 'MISSED' ||
-    session.state === 'FAILED';
+    session.state === 'FAILED' ||
+    session.state === 'ENDING';
+
+  // Determine video visibility
+  const hasRemoteVideo = isConnected && session.isRemoteCameraOn && remoteStream && remoteStream.getVideoTracks().length > 0;
+  const hasLocalVideo = session.isCameraOn && localStream && localStream.getVideoTracks().length > 0 && localStream.getVideoTracks()[0]?.enabled;
 
   return (
     <AnimatePresence>
@@ -64,11 +115,29 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-xl flex flex-col justify-between text-white p-6 select-none overflow-hidden"
+        className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between text-white p-6 select-none overflow-hidden"
       >
-        {/* Soft Background Glowing Orbs */}
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-rose-500/15 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute bottom-1/3 left-1/2 -translate-x-1/2 w-72 h-72 bg-purple-500/15 rounded-full blur-3xl pointer-events-none" />
+        {/* Remote Video Background (full screen) */}
+        {isConnected && (
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-500 ${
+              hasRemoteVideo ? 'opacity-100' : 'opacity-0'
+            }`}
+            style={{ transform: 'scaleX(-1)' }}
+          />
+        )}
+
+        {/* Soft Background Gradient (visible when no remote video) */}
+        {!hasRemoteVideo && (
+          <>
+            <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-rose-500/15 rounded-full blur-3xl pointer-events-none" />
+            <div className="absolute bottom-1/3 left-1/2 -translate-x-1/2 w-72 h-72 bg-purple-500/15 rounded-full blur-3xl pointer-events-none" />
+          </>
+        )}
 
         {/* Top Bar Header */}
         <div className="pt-4 flex flex-col items-center justify-center text-center z-10">
@@ -84,9 +153,9 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
             />
             <span className="text-[11px] font-extrabold uppercase tracking-widest text-slate-200">
               {isConnected
-                ? 'Chamada de Voz em Tempo Real'
+                ? 'Chamada de Vídeo em Tempo Real'
                 : isIncoming
-                ? 'Chamada de Voz Recebida'
+                ? 'Chamada Recebida'
                 : isCalling
                 ? 'Ligando para o Parceiro(a)...'
                 : isConnecting
@@ -123,34 +192,62 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
               Microfone do parceiro(a) está silenciado
             </motion.div>
           )}
+
+          {/* Partner camera off indicator */}
+          {isConnected && !session.isRemoteCameraOn && (
+            <motion.div
+              initial={{ opacity: 0, y: -5 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-1 px-2.5 py-0.5 rounded-full bg-slate-500/20 border border-slate-400/30 text-[10px] font-bold text-slate-300"
+            >
+              Câmera do parceiro(a) desligada
+            </motion.div>
+          )}
         </div>
 
-        {/* Center Main Stage (Avatar & Sound Waves) */}
+        {/* Center Main Stage */}
         <div className="flex-1 flex flex-col items-center justify-center z-10 my-6">
-          <div className="relative flex items-center justify-center">
-            {/* Animated Pulsing Rings */}
-            {(isIncoming || isCalling || isConnecting) && (
-              <>
-                <motion.div
-                  animate={{ scale: [1, 1.45, 1], opacity: [0.35, 0, 0.35] }}
-                  transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
-                  className="absolute w-44 h-44 rounded-full border-2 border-rose-400/40"
-                />
-                <motion.div
-                  animate={{ scale: [1, 1.25, 1], opacity: [0.5, 0.1, 0.5] }}
-                  transition={{ repeat: Infinity, duration: 2.2, delay: 0.4, ease: 'easeInOut' }}
-                  className="absolute w-36 h-36 rounded-full bg-rose-500/20"
-                />
-              </>
-            )}
+          {/* Remote video available → show avatar only if no video */}
+          {!hasRemoteVideo && (
+            <div className="relative flex items-center justify-center">
+              {/* Animated Pulsing Rings */}
+              {(isIncoming || isCalling || isConnecting) && (
+                <>
+                  <motion.div
+                    animate={{ scale: [1, 1.45, 1], opacity: [0.35, 0, 0.35] }}
+                    transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
+                    className="absolute w-44 h-44 rounded-full border-2 border-rose-400/40"
+                  />
+                  <motion.div
+                    animate={{ scale: [1, 1.25, 1], opacity: [0.5, 0.1, 0.5] }}
+                    transition={{ repeat: Infinity, duration: 2.2, delay: 0.4, ease: 'easeInOut' }}
+                    className="absolute w-36 h-36 rounded-full bg-rose-500/20"
+                  />
+                </>
+              )}
 
-            {/* Avatar Circle */}
-            <div className="relative z-10 w-28 h-28 sm:w-32 sm:h-32 rounded-3xl bg-gradient-to-tr from-rose-500 via-pink-500 to-purple-600 flex items-center justify-center text-5xl sm:text-6xl shadow-2xl border-4 border-white/25">
-              {session.partner?.avatar || '❤️'}
+              {/* Avatar Circle */}
+              <div className="relative z-10 w-28 h-28 sm:w-32 sm:h-32 rounded-3xl bg-gradient-to-tr from-rose-500 via-pink-500 to-purple-600 flex items-center justify-center text-5xl sm:text-6xl shadow-2xl border-4 border-white/25">
+                {session.partner?.avatar || '❤️'}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Status Label or Audio Waveform */}
+          {/* Local self-view video (PiP) — shown when connected and camera on */}
+          {isConnected && hasLocalVideo && (
+            <div className="absolute top-24 right-4 w-28 h-40 sm:w-32 sm:h-44 rounded-2xl overflow-hidden border-2 border-white/30 shadow-2xl z-20 bg-slate-800">
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+                style={{ transform: 'scaleX(-1)' }}
+              />
+            </div>
+          )}
+
+          {/* Status Label */}
           <div className="mt-8 text-center min-h-[48px] flex flex-col items-center justify-center">
             {isCalling && (
               <p className="text-sm font-bold text-slate-300 animate-pulse">
@@ -160,14 +257,14 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
 
             {isIncoming && (
               <p className="text-sm font-bold text-rose-300">
-                Toque em Aceitar para iniciar a conversa por voz ❤️
+                Toque em Aceitar para iniciar a conversa ❤️
               </p>
             )}
 
             {isConnecting && (
               <div className="flex items-center gap-2 text-sm font-bold text-purple-300">
                 <div className="w-2 h-2 rounded-full bg-purple-400 animate-ping" />
-                <span>Conectando áudio...</span>
+                <span>Conectando áudio e vídeo...</span>
               </div>
             )}
 
@@ -218,7 +315,6 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
           {/* 1. INCOMING CALL ACTIONS */}
           {isIncoming && (
             <div className="flex items-center justify-around max-w-xs mx-auto">
-              {/* Reject Button */}
               <div className="flex flex-col items-center gap-2">
                 <button
                   type="button"
@@ -232,7 +328,6 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
                 <span className="text-xs font-bold text-rose-300">Recusar</span>
               </div>
 
-              {/* Accept Button */}
               <div className="flex flex-col items-center gap-2">
                 <button
                   type="button"
@@ -280,14 +375,30 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
                   }`}
                   title={session.isMuted ? 'Desmutar' : 'Silenciar'}
                 >
-                  {session.isMuted ? (
-                    <MicOff className="w-6 h-6" />
-                  ) : (
-                    <Mic className="w-6 h-6" />
-                  )}
+                  {session.isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
                 </button>
                 <span className="text-[11px] font-bold text-slate-300">
                   {session.isMuted ? 'Mudo' : 'Microfone'}
+                </span>
+              </div>
+
+              {/* Camera Toggle Button */}
+              <div className="flex flex-col items-center gap-1.5">
+                <button
+                  type="button"
+                  id="toggle-camera-btn"
+                  onClick={handleCamera}
+                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all active:scale-95 cursor-pointer shadow-md ${
+                    session.isCameraOn
+                      ? 'bg-white/15 hover:bg-white/25 text-white'
+                      : 'bg-rose-500 text-white shadow-rose-500/30'
+                  }`}
+                  title={session.isCameraOn ? 'Desligar Câmera' : 'Ligar Câmera'}
+                >
+                  {session.isCameraOn ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+                </button>
+                <span className="text-[11px] font-bold text-slate-300">
+                  {session.isCameraOn ? 'Câmera' : 'Sem Câmera'}
                 </span>
               </div>
 
@@ -318,11 +429,7 @@ export const RealVoiceCallModal: React.FC<RealVoiceCallModalProps> = ({
                   }`}
                   title={session.isSpeakerOn ? 'Silenciar Áudio' : 'Ativar Áudio'}
                 >
-                  {session.isSpeakerOn ? (
-                    <Volume2 className="w-6 h-6" />
-                  ) : (
-                    <VolumeX className="w-6 h-6" />
-                  )}
+                  {session.isSpeakerOn ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6" />}
                 </button>
                 <span className="text-[11px] font-bold text-slate-300">
                   {session.isSpeakerOn ? 'Áudio' : 'Mudo'}

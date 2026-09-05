@@ -133,6 +133,10 @@ export class CallSignalingServer {
               this.handleMuteState(ws, payload);
               break;
 
+            case 'call:camera_state':
+              this.handleCameraState(ws, payload);
+              break;
+
             case 'call:audio_data':
               this.handleAudioData(ws, payload);
               break;
@@ -478,6 +482,15 @@ export class CallSignalingServer {
 
     const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
     this.sendTo(otherPeerId, 'call:partner_muted', { callId, isMuted });
+  }
+
+  private handleCameraState(ws: WebSocket, payload: { callId: string; userId: string; isCameraOn: boolean }) {
+    const { callId, userId, isCameraOn } = payload;
+    const call = this.activeCalls.get(callId);
+    if (!call) return;
+
+    const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
+    this.sendTo(otherPeerId, 'call:partner_camera_state', { callId, isCameraOn });
   }
 
   private handleDisconnect(userId: string, ws?: WebSocket) {
