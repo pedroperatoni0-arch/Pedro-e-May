@@ -589,12 +589,14 @@ export default function App() {
 
   return (
     <MobileShell>
-      {/* Real Voice Call Modal / Screen (WebRTC Audio Stream) */}
+      {/* Real Voice & Video Call Modal / Screen (WebRTC Audio & Video Stream) */}
       <RealVoiceCallModal
         session={realCallSession}
         onEndCall={() => callManager.endCall()}
         onMuteToggle={() => callManager.toggleMute()}
         onSpeakerToggle={() => callManager.toggleSpeaker()}
+        onCameraToggle={() => callManager.toggleCamera()}
+        onSwitchCamera={() => callManager.switchCamera()}
         onAcceptCall={() => callManager.acceptCall()}
         onRejectCall={() => callManager.rejectCall()}
       />

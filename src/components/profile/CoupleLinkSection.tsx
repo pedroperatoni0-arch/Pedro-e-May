@@ -10,6 +10,7 @@ import {
   Unlink,
   AlertCircle,
   Phone,
+  Video,
   Loader2,
   ShieldCheck,
   Copy,
@@ -125,8 +126,15 @@ export const CoupleLinkSection: React.FC<CoupleLinkSectionProps> = ({
 
   const handleStartVoiceCall = async () => {
     if (!partner) return;
-    soundManager.playPop();
-    const ok = await callManager.startCall(partner);
+    const ok = await callManager.startCall(partner, 'audio');
+    if (!ok) {
+      // Handled inside callManager / error listener
+    }
+  };
+
+  const handleStartVideoCall = async () => {
+    if (!partner) return;
+    const ok = await callManager.startCall(partner, 'video');
     if (!ok) {
       // Handled inside callManager / error listener
     }
@@ -242,15 +250,25 @@ export const CoupleLinkSection: React.FC<CoupleLinkSectionProps> = ({
                 </div>
               </div>
 
-              {/* Quick Actions */}
+              {/* Quick Actions: Voice, Video, Love Nudge */}
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
+                  id="profile-voice-call-btn"
                   onClick={handleStartVoiceCall}
                   className="p-2.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white rounded-xl transition shadow-xs cursor-pointer"
                   title="Fazer chamada de voz"
                 >
                   <Phone className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  id="profile-video-call-btn"
+                  onClick={handleStartVideoCall}
+                  className="p-2.5 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white rounded-xl transition shadow-xs cursor-pointer"
+                  title="Fazer chamada de vídeo"
+                >
+                  <Video className="w-4 h-4" />
                 </button>
                 <button
                   type="button"

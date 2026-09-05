@@ -146,6 +146,8 @@ export type CallState =
   | 'ENDED' // Call hung up normally
   | 'FAILED'; // Connection or microphone permission error
 
+export type CallType = 'audio' | 'video';
+
 export interface CallPartnerInfo {
   id: string;
   personalId: string;
@@ -153,14 +155,20 @@ export interface CallPartnerInfo {
   avatar: string;
 }
 
+export type VideoQualityLevel = 'auto' | 'max' | 'very-high' | 'high' | 'medium' | 'low' | 'min';
+
 export interface RealCallSession {
   callId: string | null;
+  callType: CallType;
   state: CallState;
   partner: CallPartnerInfo | null;
   isOutgoing: boolean;
   isMuted: boolean;
   isSpeakerOn: boolean;
+  isCameraOff?: boolean;
   isPartnerMuted: boolean;
+  isPartnerCameraOff?: boolean;
+  videoQuality?: VideoQualityLevel;
   durationSeconds: number;
   errorMessage?: string;
 }

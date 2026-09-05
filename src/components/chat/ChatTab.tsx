@@ -12,6 +12,7 @@ import {
   UserPlus,
   ShieldCheck,
   Phone,
+  Video,
   Sparkles,
   Smile,
   X
@@ -194,20 +195,36 @@ export const ChatTab: React.FC<ChatTabProps> = ({
           </div>
         </div>
 
-        {/* Header Voice Call Action */}
+        {/* Header Voice and Video Call Actions */}
         <div className="flex items-center gap-1.5">
           {isLinked && partner && (
-            <button
-              type="button"
-              onClick={() => {
-                soundManager.playPop();
-                callManager.startCall(partner);
-              }}
-              className="p-2 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-100 transition active:scale-95 flex items-center justify-center cursor-pointer shadow-2xs"
-              title="Iniciar Chamada de Voz"
-            >
-              <Phone className="w-4 h-4 text-rose-500" />
-            </button>
+            <>
+              {/* Botão Chamada de Voz */}
+              <button
+                type="button"
+                id="chat-voice-call-btn"
+                onClick={() => {
+                  callManager.startCall(partner, 'audio');
+                }}
+                className="p-2 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-100 transition active:scale-95 flex items-center justify-center cursor-pointer shadow-2xs"
+                title="Iniciar Chamada de Voz"
+              >
+                <Phone className="w-4 h-4 text-rose-500" />
+              </button>
+
+              {/* Botão Chamada de Vídeo */}
+              <button
+                type="button"
+                id="chat-video-call-btn"
+                onClick={() => {
+                  callManager.startCall(partner, 'video');
+                }}
+                className="p-2 rounded-2xl bg-purple-50 hover:bg-purple-100 text-purple-600 border border-purple-100 transition active:scale-95 flex items-center justify-center cursor-pointer shadow-2xs"
+                title="Iniciar Chamada de Vídeo"
+              >
+                <Video className="w-4 h-4 text-purple-600" />
+              </button>
+            </>
           )}
         </div>
       </div>

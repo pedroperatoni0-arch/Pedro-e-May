@@ -1,26 +1,22 @@
-// WebRTC ICE Server Configuration for Cross-Network & Mobile 4G/5G Ultra-Low Latency Calls
+// WebRTC ICE Server Configuration for Ultra-Fast, Zero-Latency P2P Direct Calls & Mobile 4G NAT Traversal
 export const DEFAULT_ICE_SERVERS: RTCConfiguration = {
   iceServers: [
+    // Primary ultra-fast STUN servers (always evaluated first by WebRTC for 0-latency P2P direct stream)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
     { urls: 'stun:global.stun.twilio.com:3478' },
     { urls: 'stun:stun.services.mozilla.com' },
-    // OpenRelay Fallback TURN servers for symmetric NAT traversal
+    // Reliable fallback TURN servers (ensures connection never fails even behind strict mobile 4G Symmetric NAT)
     {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },

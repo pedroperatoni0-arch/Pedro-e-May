@@ -466,6 +466,7 @@ export const FirebaseService = {
    */
   async createCallDoc(call: {
     callId: string;
+    callType?: 'audio' | 'video';
     callerId: string;
     callerPersonalId: string;
     callerName: string;
@@ -515,38 +516,72 @@ export const FirebaseService = {
    */
   subscribeToIncomingCalls(
     userId: string,
+    personalId: string | undefined,
     onCall: (callDoc: any) => void
   ): Unsubscribe {
     const callsRef = collection(db, 'calls');
-    const q = query(
+    const processedCalls = new Set<string>();
+
+    const handleSnapshot = (snapshot: any) => {
+      snapshot.docChanges().forEach((change: any) => {
+        if (change.type === 'added' || change.type === 'modified') {
+          const data = change.doc.data();
+          if (data && data.status === 'calling' && data.callId) {
+            // Tolerate clock skew between phones (90 seconds window)
+            const createdAt = data.createdAt ? new Date(data.createdAt).getTime() : Date.now();
+            const timeDiff = Math.abs(Date.now() - createdAt);
+            const isRecent = isNaN(timeDiff) || timeDiff < 90000;
+
+            if (isRecent) {
+              console.log(`[Firebase] Incoming call detected on Firestore:`, data.callId);
+              onCall(data);
+            }
+          }
+        }
+      });
+    };
+
+    const unsubs: Unsubscribe[] = [];
+
+    // 1. Query by account userId
+    const q1 = query(
       callsRef,
       where('calleeId', '==', userId),
       where('status', '==', 'calling'),
       limit(5)
     );
+    unsubs.push(onSnapshot(q1, handleSnapshot, (err) => {
+      console.warn('[Firebase] Incoming calls subscription error (q1):', err);
+    }));
 
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added' || change.type === 'modified') {
-            const data = change.doc.data();
-            if (data.status === 'calling') {
-              // Ensure the call is fresh (within last 40 seconds)
-              const createdAt = data.createdAt ? new Date(data.createdAt).getTime() : 0;
-              const isRecent = Date.now() - createdAt < 40000;
-              if (isRecent) {
-                console.log(`[Firebase] Incoming call detected on Firestore:`, data.callId);
-                onCall(data);
-              }
-            }
-          }
-        });
-      },
-      (err) => {
-        console.error('[Firebase] Incoming calls subscription error:', err);
-      }
-    );
+    // 2. Query by personalId (e.g. "DQ-XXX-YYYY") to guarantee reception if partner stored personalId
+    const cleanPersonalId = (personalId || '').trim();
+    if (cleanPersonalId && cleanPersonalId !== userId) {
+      const q2 = query(
+        callsRef,
+        where('calleePersonalId', '==', cleanPersonalId),
+        where('status', '==', 'calling'),
+        limit(5)
+      );
+      unsubs.push(onSnapshot(q2, handleSnapshot, (err) => {
+        console.warn('[Firebase] Incoming calls subscription error (q2):', err);
+      }));
+
+      // In case caller passed personalId into calleeId field
+      const q3 = query(
+        callsRef,
+        where('calleeId', '==', cleanPersonalId),
+        where('status', '==', 'calling'),
+        limit(5)
+      );
+      unsubs.push(onSnapshot(q3, handleSnapshot, (err) => {
+        console.warn('[Firebase] Incoming calls subscription error (q3):', err);
+      }));
+    }
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
   },
 
   /**

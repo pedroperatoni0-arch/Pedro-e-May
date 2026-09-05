@@ -21,6 +21,7 @@ export interface ActiveCall {
   calleeId: string;
   calleePersonalId: string;
   calleeName?: string;
+  callType?: 'voice' | 'video' | 'audio';
   status: 'calling' | 'connecting' | 'connected';
   createdAt: number;
   connectedAt?: number;
@@ -125,12 +126,20 @@ export class CallSignalingServer {
               this.handleIceCandidate(ws, payload);
               break;
 
+            case 'call:connected':
+              this.handleCallConnected(ws, payload);
+              break;
+
             case 'call:end':
               this.handleCallEnd(ws, payload);
               break;
 
             case 'call:mute_state':
               this.handleMuteState(ws, payload);
+              break;
+
+            case 'call:camera_state':
+              this.handleCameraState(ws, payload);
               break;
 
             case 'call:audio_data':
@@ -264,6 +273,7 @@ export class CallSignalingServer {
 
   private handleCallInitiate(ws: WebSocket, payload: {
     callId?: string;
+    callType?: 'voice' | 'video' | 'audio';
     callerId: string;
     callerPersonalId: string;
     callerName: string;
@@ -271,21 +281,34 @@ export class CallSignalingServer {
     calleeId: string;
     calleePersonalId: string;
   }) {
-    const { callerId, callerPersonalId, callerName, callerAvatar, calleeId, calleePersonalId } = payload;
+    const { callerId, callerPersonalId, callerName, callerAvatar, calleeId, calleePersonalId, callType } = payload;
+    const isVideo = callType === 'video';
 
-    console.log(`[CALL INITIATE]\ncaller=${callerId}\nreceiver=${calleeId}`);
+    console.log(`[CALL INITIATE]\ncaller=${callerId}\nreceiver=${calleeId}\ntype=${isVideo ? 'video' : 'voice'}`);
 
-    const caller = this.findClient(callerId, callerPersonalId);
-    if (!caller || caller.ws.readyState !== WebSocket.OPEN) {
-      console.warn(`[Signaling] Call initiation rejected: caller ${callerId} not found in connected sockets.`);
-      ws.send(JSON.stringify({
-        type: 'call:failed',
-        payload: {
-          reason: 'caller_offline',
-          message: 'Sua conexão com o servidor oscilou. Tentando reconectar...',
-        },
-      }));
-      return;
+    let caller = this.findClient(callerId, callerPersonalId);
+    if (!caller) {
+      // Find client that owns this active websocket
+      for (const c of this.clients.values()) {
+        if (c.ws === ws) {
+          caller = c;
+          caller.userId = callerId;
+          caller.personalId = callerPersonalId || caller.personalId;
+          break;
+        }
+      }
+    }
+    if (!caller) {
+      // Register client entry for this active websocket on the fly
+      caller = {
+        userId: callerId,
+        personalId: callerPersonalId,
+        username: callerName,
+        partnerId: calleeId,
+        ws,
+        lastPing: Date.now(),
+      };
+      this.clients.set(callerId, caller);
     }
 
     caller.partnerId = calleeId;
@@ -297,17 +320,30 @@ export class CallSignalingServer {
       console.log(`[CALL LOOKUP]\nreceiver=${calleeId}\nsocket=NOT_FOUND (will ring via Cloud Firestore Realtime)`);
     }
 
-    // Check if callee is already in another active call
+    // Check if callee is in another active call with someone else
     if (callee && callee.currentCallId && this.activeCalls.has(callee.currentCallId)) {
-      console.log(`[Signaling] Callee ${callee.userId} is in another active call`);
-      ws.send(JSON.stringify({
-        type: 'call:failed',
-        payload: {
-          reason: 'partner_busy',
-          message: `${callee.username} está em outra chamada no momento.`,
-        },
-      }));
-      return;
+      const activeCall = this.activeCalls.get(callee.currentCallId);
+      // If it is the same caller retrying or a finished call, clear the old call
+      if (activeCall && (activeCall.callerId === caller.userId || activeCall.calleeId === caller.userId)) {
+        this.cleanupCall(callee.currentCallId);
+      } else if (
+        activeCall &&
+        (activeCall.status === 'calling' || activeCall.status === 'connecting' || activeCall.status === 'connected')
+      ) {
+        console.log(`[Signaling] Callee ${callee.userId} is in another active call with someone else`);
+        ws.send(
+          JSON.stringify({
+            type: 'call:failed',
+            payload: {
+              reason: 'partner_busy',
+              message: `${callee.username} está em outra chamada no momento.`,
+            },
+          })
+        );
+        return;
+      } else {
+        this.cleanupCall(callee.currentCallId);
+      }
     }
 
     // Use client-provided callId to maintain 100% sync with Firestore document
@@ -334,6 +370,7 @@ export class CallSignalingServer {
       calleeId: callee?.userId || calleeId,
       calleePersonalId,
       calleeName: callee?.username || 'Parceiro(a)',
+      callType: isVideo ? 'video' : 'voice',
       status: 'calling',
       createdAt: Date.now(),
       timeoutTimer,
@@ -348,7 +385,7 @@ export class CallSignalingServer {
     // Notify caller that call was initiated
     caller.ws.send(JSON.stringify({
       type: 'call:initiated',
-      payload: { callId, calleeId: newCall.calleeId, calleePersonalId, calleeName: newCall.calleeName }
+      payload: { callId, calleeId: newCall.calleeId, calleePersonalId, calleeName: newCall.calleeName, callType: newCall.callType }
     }));
 
     // Send incoming call alert to callee via WebSocket if connected
@@ -359,7 +396,7 @@ export class CallSignalingServer {
         callerPersonalId,
         callerName,
         callerAvatar,
-        callType: 'voice',
+        callType: isVideo ? 'video' : 'voice',
       });
     }
   }
@@ -417,6 +454,15 @@ export class CallSignalingServer {
   private handleCallOffer(ws: WebSocket, payload: { callId: string; sdp: any; targetUserId?: string }) {
     const { callId, sdp, targetUserId } = payload;
     const call = this.activeCalls.get(callId);
+    if (call) {
+      if (call.timeoutTimer) {
+        clearTimeout(call.timeoutTimer);
+        call.timeoutTimer = undefined;
+      }
+      if (call.status === 'calling') {
+        call.status = 'connecting';
+      }
+    }
     const calleeId = targetUserId || call?.calleeId;
 
     if (calleeId) {
@@ -428,7 +474,12 @@ export class CallSignalingServer {
     const { callId, sdp, targetUserId } = payload;
     const call = this.activeCalls.get(callId);
     if (call) {
+      if (call.timeoutTimer) {
+        clearTimeout(call.timeoutTimer);
+        call.timeoutTimer = undefined;
+      }
       call.status = 'connected';
+      call.connectedAt = Date.now();
     }
     const callerId = targetUserId || call?.callerId;
 
@@ -440,10 +491,31 @@ export class CallSignalingServer {
   private handleIceCandidate(ws: WebSocket, payload: { callId: string; candidate: any; targetUserId?: string }) {
     const { callId, candidate, targetUserId } = payload;
     const call = this.activeCalls.get(callId);
+    if (call && call.timeoutTimer) {
+      clearTimeout(call.timeoutTimer);
+      call.timeoutTimer = undefined;
+    }
     const recipientId = targetUserId || (call ? (call.callerId === targetUserId ? call.calleeId : call.callerId) : undefined);
     
     if (recipientId) {
       this.sendTo(recipientId, 'call:ice_candidate', { callId, candidate });
+    }
+  }
+
+  private handleCallConnected(ws: WebSocket, payload: { callId: string; userId?: string }) {
+    const { callId, userId } = payload;
+    const call = this.activeCalls.get(callId);
+    if (call) {
+      if (call.timeoutTimer) {
+        clearTimeout(call.timeoutTimer);
+        call.timeoutTimer = undefined;
+      }
+      call.status = 'connected';
+      console.log(`[CALL] Call confirmed CONNECTED by ${userId || 'client'}: ${callId}`);
+      
+      // Notify both parties of confirmed connected state
+      if (call.callerId) this.sendTo(call.callerId, 'call:connected', { callId });
+      if (call.calleeId) this.sendTo(call.calleeId, 'call:connected', { callId });
     }
   }
 
@@ -458,17 +530,27 @@ export class CallSignalingServer {
     }
   }
 
-  private handleCallEnd(ws: WebSocket, payload: { callId: string; userId: string; reason?: string }) {
-    const { callId, userId, reason } = payload;
+  private handleCallEnd(ws: WebSocket, payload: { callId: string; userId: string; reason?: string; targetUserId?: string }) {
+    const { callId, userId, reason, targetUserId } = payload;
     const call = this.activeCalls.get(callId);
-    if (!call) return;
+    
+    let otherPeerId = targetUserId;
+    if (call) {
+      otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
+    } else if (!otherPeerId) {
+      const client = this.clients.get(userId);
+      if (client && client.partnerId) {
+        otherPeerId = client.partnerId;
+      }
+    }
 
-    const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
-    this.sendTo(otherPeerId, 'call:ended', { callId, reason: reason || 'hangup' });
+    if (otherPeerId) {
+      this.sendTo(otherPeerId, 'call:ended', { callId, reason: reason || 'hangup' });
+    }
     this.sendTo(userId, 'call:ended', { callId, reason: reason || 'hangup' });
 
     this.cleanupCall(callId);
-    console.log(`[CALL] Call ended: ${callId}`);
+    console.log(`[CALL] Call ended: ${callId} by ${userId}`);
   }
 
   private handleMuteState(ws: WebSocket, payload: { callId: string; userId: string; isMuted: boolean }) {
@@ -478,6 +560,15 @@ export class CallSignalingServer {
 
     const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
     this.sendTo(otherPeerId, 'call:partner_muted', { callId, isMuted });
+  }
+
+  private handleCameraState(ws: WebSocket, payload: { callId: string; userId: string; isCameraOff: boolean }) {
+    const { callId, userId, isCameraOff } = payload;
+    const call = this.activeCalls.get(callId);
+    if (!call) return;
+
+    const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
+    this.sendTo(otherPeerId, 'call:partner_camera_state', { callId, isCameraOff });
   }
 
   private handleDisconnect(userId: string, ws?: WebSocket) {
