@@ -140,7 +140,8 @@ export type CallState =
   | 'CALLING' // Outgoing: waiting for partner to answer
   | 'RINGING' // Incoming: partner is calling you
   | 'CONNECTING' // Negotiating WebRTC handshake & ICE
-  | 'CONNECTED' // Real voice audio stream active
+  | 'CONNECTED' // Real audio+video stream active
+  | 'ENDING' // Hangup in progress — cleaning up resources
   | 'REJECTED' // Partner declined call
   | 'MISSED' // Timeout or no answer
   | 'ENDED' // Call hung up normally
@@ -161,6 +162,8 @@ export interface RealCallSession {
   isMuted: boolean;
   isSpeakerOn: boolean;
   isPartnerMuted: boolean;
+  isCameraOn: boolean;
+  isRemoteCameraOn: boolean;
   durationSeconds: number;
   errorMessage?: string;
 }

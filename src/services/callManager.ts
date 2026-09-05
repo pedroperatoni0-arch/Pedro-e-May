@@ -3,19 +3,19 @@ import { DEFAULT_ICE_SERVERS } from './webrtcConfig';
 import { soundManager } from '../utils/audio';
 import { FirebaseService } from './firebaseService';
 import { Unsubscribe } from 'firebase/firestore';
+import { CallQualityController } from './callQualityController';
 
 type StateListener = (session: RealCallSession) => void;
 type ErrorListener = (error: string) => void;
+type StreamListener = (local: MediaStream | null, remote: MediaStream | null) => void;
 export type CoupleEventType = 'couple:linked' | 'couple:unlinked' | 'tasks:updated' | 'chat:message' | 'chat:read' | 'arena:updated' | 'user:updated';
 export type CoupleEventListener = (event: { type: CoupleEventType; payload: any }) => void;
 
 /**
- * Optimizes the SDP to configure Opus codec for crystal clear HD voice quality (WhatsApp/Discord grade)
+ * Optimizes the SDP to configure Opus codec for crystal clear HD voice quality.
  * - 32 kbps speech bitrate with 10ms packets for lower conversational latency
- * - Inband Forward Error Correction (FEC) for zero packet-loss stutter on 4G/5G/WiFi
- * - 48,000 Hz Wideband Sample Rate
- * - Mono Voice Pipeline to eliminate phase cancellation and acoustic artifacts
- * - 20ms frame delivery with zero artificial buffer accumulation
+ * - Inband FEC for packet-loss resilience on 4G/5G/WiFi
+ * - 48 kHz Wideband Sample Rate, mono to eliminate phase cancellation
  */
 function optimizeOpusSdp(rawSdp: string): string {
   if (!rawSdp) return rawSdp;
@@ -53,7 +53,11 @@ function optimizeOpusSdp(rawSdp: string): string {
   return newLines.join('\r\n');
 }
 
-const HIGH_QUALITY_AUDIO_CONSTRAINTS: MediaStreamConstraints = {
+/**
+ * Media constraints for video call — adaptive resolution with audio priority.
+ * Camera captures at 720p 30fps; the quality controller scales this down as needed.
+ */
+const MEDIA_CONSTRAINTS: MediaStreamConstraints = {
   audio: {
     echoCancellation: { ideal: true },
     noiseSuppression: { ideal: true },
@@ -62,19 +66,45 @@ const HIGH_QUALITY_AUDIO_CONSTRAINTS: MediaStreamConstraints = {
     sampleRate: { ideal: 48000 },
     latency: { ideal: 0.01, max: 0.04 },
   } as MediaTrackConstraints,
+  video: {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30, max: 30 },
+    facingMode: 'user',
+    aspectRatio: { ideal: 1.7777777778 },
+  } as MediaTrackConstraints,
+};
+
+/** Fallback audio-only constraints when camera permission is denied. */
+const AUDIO_ONLY_CONSTRAINTS: MediaStreamConstraints = {
+  audio: MEDIA_CONSTRAINTS.audio,
   video: false,
 };
+
+/** Maximum time to stay in CONNECTING before declaring failure (ms). */
+const CONNECTING_TIMEOUT_MS = 20000;
+/** Ringing timeout before declaring no answer (ms). */
+const RINGING_TIMEOUT_MS = 35000;
 
 class CallManager {
   private ws: WebSocket | null = null;
   private peerConnection: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
+  private remoteStream: MediaStream | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private durationInterval: NodeJS.Timeout | null = null;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private ringingTimeoutTimer: NodeJS.Timeout | null = null;
+  private connectingTimeoutTimer: NodeJS.Timeout | null = null;
+  private autoResetTimer: NodeJS.Timeout | null = null;
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private wakeLock: any = null;
+  private qualityController: CallQualityController | null = null;
+
+  // Perfect Negotiation state
+  private makingOffer = false;
+  private ignoreOffer = false;
+  private isPolite = false;
 
   // Firestore Realtime Unsubscribers
   private incomingCallsUnsub: Unsubscribe | null = null;
@@ -86,6 +116,7 @@ class CallManager {
   private stateListeners: Set<StateListener> = new Set();
   private errorListeners: Set<ErrorListener> = new Set();
   private coupleListeners: Set<CoupleEventListener> = new Set();
+  private streamListeners: Set<StreamListener> = new Set();
 
   private session: RealCallSession = {
     callId: null,
@@ -95,6 +126,8 @@ class CallManager {
     isMuted: false,
     isSpeakerOn: true,
     isPartnerMuted: false,
+    isCameraOn: false,
+    isRemoteCameraOn: false,
     durationSeconds: 0,
   };
 
@@ -123,7 +156,6 @@ class CallManager {
           console.log('[CallManager] Window active/online - verifying signaling connection...');
           this.connectSignaling();
         }
-        // Re-verify Firestore subscription
         this.setupFirestoreIncomingListener();
       }
     };
@@ -178,21 +210,33 @@ class CallManager {
     return el;
   }
 
-  // Subscribe to real-time couple events (linking / unlinking)
+  // --- Couple event subscription ---
+
   public onCoupleEvent(listener: CoupleEventListener): () => void {
     this.coupleListeners.add(listener);
     return () => this.coupleListeners.delete(listener);
   }
 
-  // Register current authenticated user for real-time signaling
+  // --- Stream subscription (for video elements in the UI) ---
+
+  public subscribeStreams(listener: StreamListener): () => void {
+    this.streamListeners.add(listener);
+    listener(this.localStream, this.remoteStream);
+    return () => this.streamListeners.delete(listener);
+  }
+
+  private notifyStreams() {
+    this.streamListeners.forEach((l) => l(this.localStream, this.remoteStream));
+  }
+
+  // --- User registration ---
+
   public registerUser(userId: string, personalId: string, username: string, avatar?: string, partnerId?: string) {
     this.currentUser = { id: userId, personalId, username, avatar };
     this.currentPartnerId = partnerId || null;
 
-    // 1. Setup Firestore incoming calls listener immediately (100% reliable across mobile devices)
     this.setupFirestoreIncomingListener();
 
-    // 2. Connect WebSocket as fast secondary channel
     const registerPayload = {
       userId: this.currentUser.id,
       personalId: this.currentUser.personalId,
@@ -221,10 +265,7 @@ class CallManager {
         (callDoc) => {
           if (!callDoc || !callDoc.callId) return;
 
-          // If we are already in this call, ignore
-          if (this.session.callId === callDoc.callId) {
-            return;
-          }
+          if (this.session.callId === callDoc.callId) return;
 
           if (this.session.state !== 'IDLE') {
             console.log('[CallManager] Busy with another call, ignoring incoming call:', callDoc.callId);
@@ -285,7 +326,6 @@ class CallManager {
           });
         }
 
-        // Flush any pending queued signals
         while (this.pendingSignals.length > 0) {
           const pending = this.pendingSignals.shift();
           if (pending && socket.readyState === WebSocket.OPEN) {
@@ -306,7 +346,6 @@ class CallManager {
       socket.onclose = () => {
         if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
 
-        // Exponential backoff between 1s and 10s
         const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), this.maxReconnectDelay);
         this.reconnectAttempts++;
 
@@ -336,8 +375,17 @@ class CallManager {
     }
   }
 
-  // Handle incoming signaling messages from backend
+  // --- Signaling message handler with callId isolation ---
+
   private async handleSignalingMessage(type: string, payload: any) {
+    // Reject signals that belong to a different call
+    const signalCallId = payload?.callId;
+    const isCallEvent = type.startsWith('call:');
+    if (isCallEvent && signalCallId && this.session.callId && signalCallId !== this.session.callId) {
+      console.log(`[CallManager] Ignoring stale signal "${type}" for call ${signalCallId} (current: ${this.session.callId})`);
+      return;
+    }
+
     switch (type) {
       case 'registered':
         console.log(`[WS REGISTER]\nuserId=${this.currentUser?.id}\nregistered=true`);
@@ -352,7 +400,7 @@ class CallManager {
       case 'chat:message':
       case 'arena:updated':
       case 'user:updated':
-        console.log(`[CallManager] Received real-time sync event: ${type}`, payload);
+      case 'chat:read':
         this.coupleListeners.forEach((listener) => {
           try {
             listener({ type: type as any, payload });
@@ -363,7 +411,7 @@ class CallManager {
         break;
 
       case 'call:incoming':
-        console.log('[CALL] call:incoming received via WebSocket', payload);
+        if (this.session.state !== 'IDLE') return;
         this.onIncomingCall(payload);
         break;
 
@@ -379,6 +427,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         this.updateState({ state: 'CONNECTING' });
+        this.startConnectingTimeout();
         if (this.session.isOutgoing) {
           await this.createAndSendOffer();
           if (this.session.callId) {
@@ -401,11 +450,9 @@ class CallManager {
 
       case 'call:rejected':
         soundManager.stopCallingTone();
+        soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'REJECTED',
-          errorMessage: 'Chamada recusada pelo parceiro(a).',
-        });
+        this.updateState({ state: 'REJECTED', errorMessage: 'Chamada recusada pelo parceiro(a).' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset();
         break;
@@ -413,10 +460,7 @@ class CallManager {
       case 'call:cancelled':
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'ENDED',
-          errorMessage: 'Chamada cancelada pelo chamador.',
-        });
+        this.updateState({ state: 'ENDED', errorMessage: 'Chamada cancelada pelo chamador.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset();
         break;
@@ -425,10 +469,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'MISSED',
-          errorMessage: 'Sem resposta.',
-        });
+        this.updateState({ state: 'MISSED', errorMessage: 'Sem resposta.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset();
         break;
@@ -437,10 +478,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'ENDED',
-          errorMessage: payload?.message || 'Chamada encerrada.',
-        });
+        this.updateState({ state: 'ENDED', errorMessage: payload?.message || 'Chamada encerrada.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset();
         break;
@@ -449,15 +487,15 @@ class CallManager {
         this.updateState({ isPartnerMuted: !!payload.isMuted });
         break;
 
+      case 'call:partner_camera_state':
+        this.updateState({ isRemoteCameraOn: !!payload.isCameraOn });
+        break;
+
       case 'call:failed':
-        // If it's a partner_busy message, show it
         if (payload?.reason === 'partner_busy') {
           soundManager.stopCallingTone();
           soundManager.playCallEnded();
-          this.updateState({
-            state: 'FAILED',
-            errorMessage: payload.message || 'Parceiro ocupado em outra chamada.',
-          });
+          this.updateState({ state: 'FAILED', errorMessage: payload.message || 'Parceiro ocupado em outra chamada.' });
           this.cleanupMediaAndPeer();
           this.scheduleAutoReset(3000);
         }
@@ -467,7 +505,6 @@ class CallManager {
 
   // --- Public Call Control Methods ---
 
-  // Start outgoing call to partner
   public async startCall(partner: UserAccount): Promise<boolean> {
     if (!this.currentUser) {
       this.notifyError('Usuário não autenticado.');
@@ -479,23 +516,40 @@ class CallManager {
       return false;
     }
 
+    if (this.session.state !== 'IDLE') {
+      this.notifyError('Já existe uma chamada em andamento.');
+      return false;
+    }
+
     const audioEl = this.initAudioElement();
     if (audioEl) {
       audioEl.play().catch(() => {});
     }
     console.log(`[CALL INITIATE]\ncaller=${this.currentUser.id}\nreceiver=${partner.id}`);
 
-    // Acquire high quality microphone stream
+    // Acquire camera + microphone; fall back to audio-only on camera denial
+    let hasVideo = true;
     try {
-      this.localStream = await navigator.mediaDevices.getUserMedia(HIGH_QUALITY_AUDIO_CONSTRAINTS);
+      this.localStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
     } catch (err: any) {
-      console.error('[CallManager] Microphone permission denied:', err);
-      this.updateState({
-        state: 'FAILED',
-        errorMessage: 'Permissão de microfone necessária para fazer a chamada.',
-      });
-      this.scheduleAutoReset(3000);
-      return false;
+      if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
+        // Camera denied — try audio-only so the call can still proceed
+        try {
+          this.localStream = await navigator.mediaDevices.getUserMedia(AUDIO_ONLY_CONSTRAINTS);
+          hasVideo = false;
+          console.log('[CallManager] Camera denied, proceeding audio-only');
+        } catch (audioErr: any) {
+          console.error('[CallManager] Microphone permission denied:', audioErr);
+          this.updateState({ state: 'FAILED', errorMessage: 'Permissão de microfone necessária para fazer a chamada.' });
+          this.scheduleAutoReset(3000);
+          return false;
+        }
+      } else {
+        console.error('[CallManager] getUserMedia error:', err);
+        this.updateState({ state: 'FAILED', errorMessage: 'Erro ao acessar câmera/microfone.' });
+        this.scheduleAutoReset(3000);
+        return false;
+      }
     }
 
     const callId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -513,12 +567,20 @@ class CallManager {
       isMuted: false,
       isSpeakerOn: true,
       isPartnerMuted: false,
+      isCameraOn: hasVideo,
+      isRemoteCameraOn: false,
       durationSeconds: 0,
     };
     this.notifyState();
+    this.notifyStreams();
     soundManager.startCallingTone();
 
-    // 1. Create call document in Cloud Firestore (Guaranteed Real-Time Delivery to partner)
+    // Perfect Negotiation: caller is impolite
+    this.isPolite = false;
+    this.makingOffer = false;
+    this.ignoreOffer = false;
+
+    // 1. Create call document in Cloud Firestore
     try {
       await FirebaseService.createCallDoc({
         callId,
@@ -548,27 +610,23 @@ class CallManager {
     // 3. Monitor active call document in Firestore
     this.monitorActiveCall(callId);
 
-    // 4. Set 35-second ringing timeout
+    // 4. Set ringing timeout
     if (this.ringingTimeoutTimer) clearTimeout(this.ringingTimeoutTimer);
     this.ringingTimeoutTimer = setTimeout(() => {
       if (this.session.callId === callId && this.session.state === 'CALLING') {
         console.log('[CallManager] Call ringing timeout (no answer after 35s)');
         soundManager.stopCallingTone();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'MISSED',
-          errorMessage: 'Sem resposta.',
-        });
+        this.updateState({ state: 'MISSED', errorMessage: 'Sem resposta.' });
         FirebaseService.updateCallDoc(callId, { status: 'timeout' }).catch(() => {});
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset(3000);
       }
-    }, 35000);
+    }, RINGING_TIMEOUT_MS);
 
     return true;
   }
 
-  // Accept incoming call
   public async acceptCall(): Promise<boolean> {
     if (!this.session.callId || this.session.state !== 'RINGING') {
       return false;
@@ -581,28 +639,42 @@ class CallManager {
     }
     soundManager.stopIncomingRing();
 
-    // Acquire high quality microphone stream
+    // Acquire camera + microphone; fall back to audio-only
+    let hasVideo = true;
     try {
-      this.localStream = await navigator.mediaDevices.getUserMedia(HIGH_QUALITY_AUDIO_CONSTRAINTS);
-    } catch (err) {
-      console.error('[CallManager] Microphone access failed on accept:', err);
-      this.updateState({
-        state: 'FAILED',
-        errorMessage: 'Permissão de microfone necessária para atender a chamada.',
-      });
-      this.sendSignal('call:reject', {
-        callId,
-        calleeId: this.currentUser?.id,
-        reason: 'permission_denied',
-      });
-      FirebaseService.updateCallDoc(callId, { status: 'rejected', reason: 'permission_denied' }).catch(() => {});
-      this.scheduleAutoReset(3000);
-      return false;
+      this.localStream = await navigator.mediaDevices.getUserMedia(MEDIA_CONSTRAINTS);
+    } catch (err: any) {
+      if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
+        try {
+          this.localStream = await navigator.mediaDevices.getUserMedia(AUDIO_ONLY_CONSTRAINTS);
+          hasVideo = false;
+          console.log('[CallManager] Camera denied on accept, proceeding audio-only');
+        } catch (audioErr: any) {
+          console.error('[CallManager] Microphone access failed on accept:', audioErr);
+          this.updateState({ state: 'FAILED', errorMessage: 'Permissão de microfone necessária para atender a chamada.' });
+          this.sendSignal('call:reject', { callId, calleeId: this.currentUser?.id, reason: 'permission_denied' });
+          FirebaseService.updateCallDoc(callId, { status: 'rejected', reason: 'permission_denied' }).catch(() => {});
+          this.scheduleAutoReset(3000);
+          return false;
+        }
+      } else {
+        console.error('[CallManager] getUserMedia error on accept:', err);
+        this.updateState({ state: 'FAILED', errorMessage: 'Erro ao acessar câmera/microfone.' });
+        this.scheduleAutoReset(3000);
+        return false;
+      }
     }
 
-    this.updateState({ state: 'CONNECTING' });
+    this.updateState({ state: 'CONNECTING', isCameraOn: hasVideo });
+    this.notifyStreams();
+    this.startConnectingTimeout();
 
-    // Initialize peer connection with local audio stream
+    // Perfect Negotiation: callee is polite
+    this.isPolite = true;
+    this.makingOffer = false;
+    this.ignoreOffer = false;
+
+    // Initialize peer connection with local tracks
     this.createPeerConnection();
 
     // 1. Update Firestore call doc
@@ -624,29 +696,20 @@ class CallManager {
     return true;
   }
 
-  // Reject incoming call
   public rejectCall() {
     const callId = this.session.callId;
     soundManager.stopIncomingRing();
     soundManager.playCallEnded();
 
     if (callId) {
-      this.sendSignal('call:reject', {
-        callId,
-        calleeId: this.currentUser?.id,
-        reason: 'declined',
-      });
-      FirebaseService.updateCallDoc(callId, {
-        status: 'rejected',
-        reason: 'declined',
-      }).catch(() => {});
+      this.sendSignal('call:reject', { callId, calleeId: this.currentUser?.id, reason: 'declined' });
+      FirebaseService.updateCallDoc(callId, { status: 'rejected', reason: 'declined' }).catch(() => {});
     }
 
     this.cleanupMediaAndPeer();
     this.resetToIdle();
   }
 
-  // Cancel outgoing call before answer
   public cancelCall() {
     const callId = this.session.callId;
     soundManager.stopCallingTone();
@@ -654,37 +717,25 @@ class CallManager {
     soundManager.playCallEnded();
 
     if (callId && this.currentUser) {
-      this.sendSignal('call:cancel', {
-        callId,
-        callerId: this.currentUser.id,
-        userId: this.currentUser.id,
-      });
-      FirebaseService.updateCallDoc(callId, {
-        status: 'cancelled',
-      }).catch(() => {});
+      this.sendSignal('call:cancel', { callId, callerId: this.currentUser.id, userId: this.currentUser.id });
+      FirebaseService.updateCallDoc(callId, { status: 'cancelled' }).catch(() => {});
     }
 
     this.cleanupMediaAndPeer();
     this.resetToIdle();
   }
 
-  // Hangup active call
   public endCall() {
     const callId = this.session.callId;
     soundManager.stopCallingTone();
     soundManager.stopIncomingRing();
     soundManager.playCallEnded();
 
+    this.updateState({ state: 'ENDING' });
+
     if (callId && this.currentUser) {
-      this.sendSignal('call:end', {
-        callId,
-        userId: this.currentUser.id,
-        reason: 'user_hangup',
-      });
-      FirebaseService.updateCallDoc(callId, {
-        status: 'ended',
-        reason: 'user_hangup',
-      }).catch(() => {});
+      this.sendSignal('call:end', { callId, userId: this.currentUser.id, reason: 'user_hangup' });
+      FirebaseService.updateCallDoc(callId, { status: 'ended', reason: 'user_hangup' }).catch(() => {});
     }
 
     this.cleanupMediaAndPeer();
@@ -692,7 +743,6 @@ class CallManager {
     this.scheduleAutoReset(1200);
   }
 
-  // Toggle microphone mute
   public toggleMute() {
     if (!this.localStream) return;
     const audioTrack = this.localStream.getAudioTracks()[0];
@@ -711,7 +761,25 @@ class CallManager {
     }
   }
 
-  // Toggle speakerphone / audio output
+  public toggleCamera() {
+    if (!this.localStream) return;
+    const videoTrack = this.localStream.getVideoTracks()[0];
+    if (!videoTrack) return;
+
+    const nextCameraOn = !this.session.isCameraOn;
+    videoTrack.enabled = nextCameraOn;
+    this.updateState({ isCameraOn: nextCameraOn });
+    this.notifyStreams();
+
+    if (this.session.callId && this.currentUser) {
+      this.sendSignal('call:camera_state', {
+        callId: this.session.callId,
+        userId: this.currentUser.id,
+        isCameraOn: nextCameraOn,
+      });
+    }
+  }
+
   public toggleSpeaker() {
     const nextSpeaker = !this.session.isSpeakerOn;
     if (this.remoteAudio) {
@@ -733,11 +801,7 @@ class CallManager {
 
     if (this.session.state !== 'IDLE') {
       if (this.session.callId !== payload.callId) {
-        this.sendSignal('call:reject', {
-          callId: payload.callId,
-          calleeId: this.currentUser?.id,
-          reason: 'busy',
-        });
+        this.sendSignal('call:reject', { callId: payload.callId, calleeId: this.currentUser?.id, reason: 'busy' });
       }
       return;
     }
@@ -755,13 +819,14 @@ class CallManager {
       isMuted: false,
       isSpeakerOn: true,
       isPartnerMuted: false,
+      isCameraOn: false,
+      isRemoteCameraOn: false,
       durationSeconds: 0,
     };
 
     soundManager.startIncomingRing();
     this.notifyState();
 
-    // Monitor Firestore call document in case caller cancels or call expires
     this.monitorActiveCall(payload.callId);
   }
 
@@ -786,6 +851,7 @@ class CallManager {
         soundManager.stopIncomingRing();
         if (this.session.state === 'CALLING') {
           this.updateState({ state: 'CONNECTING' });
+          this.startConnectingTimeout();
           await this.createAndSendOffer();
           this.listenToIceCandidates(callId);
         }
@@ -803,6 +869,7 @@ class CallManager {
           if (this.session.state === 'RINGING') {
             soundManager.stopIncomingRing();
             this.updateState({ state: 'CONNECTING' });
+            this.startConnectingTimeout();
           }
           await this.handleReceivedOffer(callDoc.offer);
         }
@@ -820,10 +887,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'REJECTED',
-          errorMessage: 'Chamada recusada pelo parceiro(a).',
-        });
+        this.updateState({ state: 'REJECTED', errorMessage: 'Chamada recusada pelo parceiro(a).' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset(1500);
       }
@@ -833,10 +897,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'ENDED',
-          errorMessage: 'Chamada cancelada.',
-        });
+        this.updateState({ state: 'ENDED', errorMessage: 'Chamada cancelada.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset(1500);
       }
@@ -846,10 +907,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'ENDED',
-          errorMessage: 'Chamada encerrada.',
-        });
+        this.updateState({ state: 'ENDED', errorMessage: 'Chamada encerrada.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset(1500);
       }
@@ -859,10 +917,7 @@ class CallManager {
         soundManager.stopCallingTone();
         soundManager.stopIncomingRing();
         soundManager.playCallEnded();
-        this.updateState({
-          state: 'MISSED',
-          errorMessage: 'Sem resposta.',
-        });
+        this.updateState({ state: 'MISSED', errorMessage: 'Sem resposta.' });
         this.cleanupMediaAndPeer();
         this.scheduleAutoReset(2000);
       }
@@ -906,6 +961,27 @@ class CallManager {
     }
   }
 
+  // --- Connecting timeout (fires only if stuck in CONNECTING) ---
+
+  private startConnectingTimeout() {
+    this.clearConnectingTimeout();
+    this.connectingTimeoutTimer = setTimeout(() => {
+      if (this.session.state === 'CONNECTING') {
+        console.warn('[CallManager] Connecting timeout (20s) — call failed to establish');
+        this.handleCallFailed('Tempo esgotado ao conectar. Tente novamente.');
+      }
+    }, CONNECTING_TIMEOUT_MS);
+  }
+
+  private clearConnectingTimeout() {
+    if (this.connectingTimeoutTimer) {
+      clearTimeout(this.connectingTimeoutTimer);
+      this.connectingTimeoutTimer = null;
+    }
+  }
+
+  // --- Peer Connection Setup ---
+
   private createPeerConnection(): RTCPeerConnection {
     if (this.peerConnection) {
       try {
@@ -920,75 +996,116 @@ class CallManager {
     const pc = new RTCPeerConnection(DEFAULT_ICE_SERVERS);
     this.peerConnection = pc;
 
-    // Attach local audio track
+    // Attach local audio + video tracks
     if (this.localStream) {
-      this.localStream.getAudioTracks().forEach((track) => {
+      this.localStream.getTracks().forEach((track) => {
         pc.addTrack(track, this.localStream!);
       });
     }
 
-    // Bidirectional remote audio reception with the smallest supported playout buffer.
-    pc.ontrack = (event) => {
-      console.log('[CallManager] Remote audio track received:', event.track.id, 'readyState:', event.track.readyState);
-      
-      // Force instantaneous real-time playback (removes 4-5s buffer delay)
-      if (event.receiver) {
-        try {
-          if ('playoutDelayHint' in event.receiver) {
-            (event.receiver as any).playoutDelayHint = 0;
-          }
-          if ('jitterBufferTarget' in event.receiver) {
-            (event.receiver as any).jitterBufferTarget = 0;
-          }
-        } catch (e) {}
+    // Configure sender parameters for audio priority and video adaptation
+    this.configureSenders(pc);
+
+    // Perfect Negotiation: onnegotiationneeded
+    pc.onnegotiationneeded = async () => {
+      if (!this.peerConnection || this.peerConnection !== pc) return;
+      try {
+        this.makingOffer = true;
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        const enhancedSdp = optimizeOpusSdp(offer.sdp || '');
+        const enhancedOffer: RTCSessionDescriptionInit = { type: offer.type, sdp: enhancedSdp };
+        await pc.setLocalDescription(enhancedOffer);
+
+        if (this.session.callId) {
+          const sdpPayload = { type: enhancedOffer.type, sdp: enhancedOffer.sdp };
+          FirebaseService.updateCallDoc(this.session.callId, { offer: sdpPayload }).catch(() => {});
+          this.sendSignal('call:offer', { callId: this.session.callId, sdp: enhancedOffer, targetUserId: this.session.partner?.id });
+        }
+      } catch (err) {
+        console.error('[CallManager] onnegotiationneeded error:', err);
+      } finally {
+        this.makingOffer = false;
       }
+    };
 
-      const audioEl = this.initAudioElement();
-      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+    // Remote track reception — audio + video
+    pc.ontrack = (event) => {
+      console.log(`[CallManager] Remote ${event.track.kind} track received: ${event.track.id} readyState: ${event.track.readyState}`);
 
-      if (audioEl) {
-        audioEl.srcObject = stream;
-        audioEl.volume = 1.0;
-        audioEl.muted = !this.session.isSpeakerOn;
-        audioEl.playbackRate = 1.0;
-        audioEl.autoplay = true;
-        audioEl.preload = 'none';
-        audioEl.setAttribute('playsinline', '');
+      if (event.track.kind === 'audio') {
+        // Force lowest playout delay for real-time audio
+        if (event.receiver) {
+          try {
+            if ('playoutDelayHint' in event.receiver) {
+              (event.receiver as any).playoutDelayHint = 0;
+            }
+            if ('jitterBufferTarget' in event.receiver) {
+              (event.receiver as any).jitterBufferTarget = 0;
+            }
+          } catch (e) {}
+        }
 
-        const playAudioStream = () => {
-          if (audioEl && audioEl.srcObject) {
-            audioEl.play().catch((err) => {
-              console.warn('[CallManager] AutoPlay blocked, attaching touch listener to unlock:', err);
-              const oneTouchUnlock = () => {
-                audioEl.play().catch(() => {});
-                window.removeEventListener('touchstart', oneTouchUnlock);
-                window.removeEventListener('click', oneTouchUnlock);
-              };
-              window.addEventListener('touchstart', oneTouchUnlock, { once: true, passive: true });
-              window.addEventListener('click', oneTouchUnlock, { once: true, passive: true });
-            });
-          }
-        };
+        const audioEl = this.initAudioElement();
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
 
-        playAudioStream();
+        if (audioEl) {
+          audioEl.srcObject = stream;
+          audioEl.volume = 1.0;
+          audioEl.muted = !this.session.isSpeakerOn;
+          audioEl.playbackRate = 1.0;
+          audioEl.autoplay = true;
+          audioEl.setAttribute('playsinline', '');
+
+          const playAudioStream = () => {
+            if (audioEl && audioEl.srcObject) {
+              audioEl.play().catch((err) => {
+                console.warn('[CallManager] AutoPlay blocked, attaching touch listener:', err);
+                const oneTouchUnlock = () => {
+                  audioEl.play().catch(() => {});
+                  window.removeEventListener('touchstart', oneTouchUnlock);
+                };
+                window.addEventListener('touchstart', oneTouchUnlock, { once: true, passive: true });
+              });
+            }
+          };
+          playAudioStream();
+          event.track.onunmute = () => playAudioStream();
+        }
+      } else if (event.track.kind === 'video') {
+        // Collect remote video tracks into a dedicated stream
+        if (!this.remoteStream) {
+          this.remoteStream = new MediaStream();
+        }
+        // Avoid duplicate tracks
+        if (!this.remoteStream.getTracks().some((t) => t.id === event.track.id)) {
+          this.remoteStream.addTrack(event.track);
+        }
+        this.updateState({ isRemoteCameraOn: event.track.enabled });
+        this.notifyStreams();
 
         event.track.onunmute = () => {
-          console.log('[CallManager] Remote audio track unmuted!');
-          playAudioStream();
+          this.updateState({ isRemoteCameraOn: true });
+          this.notifyStreams();
+        };
+        event.track.onmute = () => {
+          this.updateState({ isRemoteCameraOn: false });
+          this.notifyStreams();
+        };
+        event.track.onended = () => {
+          this.updateState({ isRemoteCameraOn: false });
+          this.notifyStreams();
         };
       }
 
-      if (this.session.state !== 'CONNECTED') {
+      if (this.session.state !== 'CONNECTED' && this.session.state !== 'ENDING') {
         this.handleCallConnected();
       }
     };
 
-    // Candidate discovery (Trickle ICE Dual-Broadcasting)
+    // ICE candidate discovery (Trickle ICE — dual broadcast via WS + Firestore)
     pc.onicecandidate = (event) => {
       if (event.candidate && this.session.callId && this.currentUser) {
-        // Send via Firestore
         FirebaseService.addCallIceCandidate(this.session.callId, this.currentUser.id, event.candidate).catch(() => {});
-        // Send via WebSocket
         this.sendSignal('call:ice_candidate', {
           callId: this.session.callId,
           candidate: event.candidate,
@@ -997,37 +1114,82 @@ class CallManager {
       }
     };
 
+    // Connection state monitoring — don't drop on transient disconnect
     pc.onconnectionstatechange = () => {
-      console.log('[CallManager] RTCPeerConnection connectionState:', pc.connectionState);
+      console.log('[CallManager] connectionState:', pc.connectionState);
       if (pc.connectionState === 'connected') {
         this.connectionRecoveryAttempts = 0;
         this.clearIceRestartTimer();
         this.handleCallConnected();
       } else if (pc.connectionState === 'disconnected') {
-        console.log('[CallManager] Connection disconnected temporarily, scheduling ICE recovery...');
+        console.log('[CallManager] Connection disconnected — scheduling ICE recovery...');
         this.scheduleIceRestart('connection_disconnected');
       } else if (pc.connectionState === 'failed') {
-        console.log('[CallManager] Connection failed, renegotiating ICE...');
+        console.log('[CallManager] Connection failed — renegotiating ICE...');
         this.scheduleIceRestart('connection_failed');
       }
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log('[CallManager] RTCPeerConnection iceConnectionState:', pc.iceConnectionState);
+      console.log('[CallManager] iceConnectionState:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         this.connectionRecoveryAttempts = 0;
         this.clearIceRestartTimer();
         this.handleCallConnected();
       } else if (pc.iceConnectionState === 'disconnected') {
-        console.log('[CallManager] ICE disconnected temporarily, scheduling recovery...');
+        console.log('[CallManager] ICE disconnected — scheduling recovery...');
         this.scheduleIceRestart('ice_disconnected');
       } else if (pc.iceConnectionState === 'failed') {
-        console.log('[CallManager] ICE failed, renegotiating ICE...');
+        console.log('[CallManager] ICE failed — renegotiating...');
         this.scheduleIceRestart('ice_failed');
       }
     };
 
     return pc;
+  }
+
+  /**
+   * Configures RTCRtpSender parameters:
+   * - Audio: high priority, 32kbps Opus
+   * - Video: degradationPreference = "maintain-framerate" (drop resolution before FPS)
+   */
+  private configureSenders(pc: RTCPeerConnection) {
+    const senders = pc.getSenders();
+
+    for (const sender of senders) {
+      if (!sender.track) continue;
+
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+
+        if (sender.track.kind === 'audio') {
+          // Audio gets high priority — never sacrifice audio for video
+          (params.encodings[0] as any).priority = 'high';
+          params.encodings[0].maxBitrate = 32000;
+        } else if (sender.track.kind === 'video') {
+          // Video starts at top quality; controller will adapt
+          (params.encodings[0] as any).priority = 'medium';
+          params.encodings[0].maxBitrate = 1500000;
+          if ('maxFramerate' in params.encodings[0]) {
+            (params.encodings[0] as any).maxFramerate = 30;
+          }
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+          // Prefer maintaining framerate over resolution during bandwidth drops
+          if ('degradationPreference' in params) {
+            params.degradationPreference = 'maintain-framerate';
+          }
+        }
+
+        sender.setParameters(params).catch((err) => {
+          console.warn(`[CallManager] setParameters failed for ${sender.track?.kind}:`, err);
+        });
+      } catch (err) {
+        console.warn('[CallManager] Error configuring sender:', err);
+      }
+    }
   }
 
   private async processPendingIceCandidates() {
@@ -1050,51 +1212,36 @@ class CallManager {
         pc = this.createPeerConnection();
       } else if (this.localStream) {
         const senders = pc.getSenders();
-        this.localStream.getAudioTracks().forEach((track) => {
+        this.localStream.getTracks().forEach((track) => {
           if (!senders.some((s) => s.track?.id === track.id)) {
             pc!.addTrack(track, this.localStream!);
           }
         });
       }
 
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: false,
-      });
-
-      // Enhance SDP with WhatsApp-grade HD Opus audio settings
+      // If onnegotiationalready hasn't fired (or we need an explicit offer):
+      this.makingOffer = true;
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       const enhancedSdp = optimizeOpusSdp(offer.sdp || '');
       const enhancedOffer: RTCSessionDescriptionInit = { type: offer.type, sdp: enhancedSdp };
       await pc.setLocalDescription(enhancedOffer);
+      this.makingOffer = false;
 
       const sdpPayload = { type: enhancedOffer.type, sdp: enhancedOffer.sdp };
 
       if (this.session.callId) {
-        // 1. Write offer to Firestore
-        FirebaseService.updateCallDoc(this.session.callId, {
-          offer: sdpPayload,
-          status: 'connecting',
-        }).catch(() => {});
-
-        // 2. Send offer via WebSocket
-        this.sendSignal('call:offer', {
-          callId: this.session.callId,
-          sdp: enhancedOffer,
-          targetUserId: this.session.partner?.id,
-        });
+        FirebaseService.updateCallDoc(this.session.callId, { offer: sdpPayload, status: 'connecting' }).catch(() => {});
+        this.sendSignal('call:offer', { callId: this.session.callId, sdp: enhancedOffer, targetUserId: this.session.partner?.id });
       }
     } catch (err) {
+      this.makingOffer = false;
       console.error('[CallManager] Error creating SDP offer:', err);
-      this.handleCallFailed('Erro ao negociar conexão de áudio.');
+      this.handleCallFailed('Erro ao negociar conexão.');
     }
   }
 
-  /**
-   * Recover a mobile call whose NAT route disappeared after being connected.
-   * restartIce() alone only marks the next offer for an ICE restart; it does
-   * not send that offer. Renegotiating here keeps both phones on the same
-   * transport after a Wi-Fi/mobile handoff or a stale UDP mapping.
-   */
+  // --- ICE Restart / Recovery ---
+
   private scheduleIceRestart(reason: string) {
     if (
       !this.session.callId ||
@@ -1111,20 +1258,12 @@ class CallManager {
     this.iceRestartTimer = setTimeout(async () => {
       this.iceRestartTimer = null;
 
-      if (
-        !this.session.callId ||
-        this.session.callId !== callId ||
-        this.session.state !== 'CONNECTED' ||
-        !this.peerConnection
-      ) {
+      if (!this.session.callId || this.session.callId !== callId || this.session.state !== 'CONNECTED' || !this.peerConnection) {
         return;
       }
 
       const pc = this.peerConnection;
-      if (pc.connectionState === 'connected' && (
-        pc.iceConnectionState === 'connected' ||
-        pc.iceConnectionState === 'completed'
-      )) {
+      if (pc.connectionState === 'connected' && (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed')) {
         this.connectionRecoveryAttempts = 0;
         return;
       }
@@ -1153,13 +1292,7 @@ class CallManager {
   }
 
   private async restartIceAndRenegotiate() {
-    if (
-      this.isRestartingIce ||
-      !this.peerConnection ||
-      !this.session.callId ||
-      !this.currentUser ||
-      this.session.state !== 'CONNECTED'
-    ) {
+    if (this.isRestartingIce || !this.peerConnection || !this.session.callId || !this.currentUser || this.session.state !== 'CONNECTED') {
       return;
     }
 
@@ -1172,99 +1305,84 @@ class CallManager {
         pc.restartIce();
       }
 
-      const offer = await pc.createOffer({
-        iceRestart: true,
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: false,
-      });
+      this.makingOffer = true;
+      const offer = await pc.createOffer({ iceRestart: true, offerToReceiveAudio: true, offerToReceiveVideo: true });
       const enhancedSdp = optimizeOpusSdp(offer.sdp || '');
-      const enhancedOffer: RTCSessionDescriptionInit = {
-        type: offer.type,
-        sdp: enhancedSdp,
-      };
-
+      const enhancedOffer: RTCSessionDescriptionInit = { type: offer.type, sdp: enhancedSdp };
       await pc.setLocalDescription(enhancedOffer);
+      this.makingOffer = false;
+
       const sdpPayload = { type: enhancedOffer.type, sdp: enhancedOffer.sdp };
 
-      // Both channels are intentional: WebSocket is immediate and Firestore
-      // allows the repair to complete after a socket reconnection.
-      FirebaseService.updateCallDoc(callId, {
-        offer: sdpPayload,
-        status: 'connecting',
-        iceRestartedAt: new Date().toISOString(),
-      }).catch(() => {});
-
-      this.sendSignal('call:offer', {
-        callId,
-        sdp: enhancedOffer,
-        targetUserId: this.session.partner?.id,
-      });
+      FirebaseService.updateCallDoc(callId, { offer: sdpPayload, status: 'connecting', iceRestartedAt: new Date().toISOString() }).catch(() => {});
+      this.sendSignal('call:offer', { callId, sdp: enhancedOffer, targetUserId: this.session.partner?.id });
     } catch (err) {
+      this.makingOffer = false;
       console.warn('[CallManager] ICE renegotiation attempt failed:', err);
     } finally {
       this.isRestartingIce = false;
     }
   }
 
+  // --- Offer / Answer handling with Perfect Negotiation ---
+
   private async handleReceivedOffer(sdp: RTCSessionDescriptionInit) {
     try {
       const offerSdp = sdp?.sdp || '';
-      if (
-        offerSdp &&
-        (offerSdp === this.processedRemoteOfferSdp ||
-          offerSdp === this.processingRemoteOfferSdp)
-      ) {
+      if (offerSdp && (offerSdp === this.processedRemoteOfferSdp || offerSdp === this.processingRemoteOfferSdp)) {
         return;
       }
       this.processingRemoteOfferSdp = offerSdp || null;
 
-      let pc = this.peerConnection;
+      const pc = this.peerConnection;
       if (!pc || pc.signalingState === 'closed') {
-        pc = this.createPeerConnection();
+        this.createPeerConnection();
       } else if (this.localStream) {
         const senders = pc.getSenders();
-        this.localStream.getAudioTracks().forEach((track) => {
+        this.localStream.getTracks().forEach((track) => {
           if (!senders.some((s) => s.track?.id === track.id)) {
             pc!.addTrack(track, this.localStream!);
           }
         });
       }
 
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const ready = this.peerConnection!;
+      // Perfect Negotiation: glare handling
+      const offerCollision = this.makingOffer || ready.signalingState !== 'stable';
+      this.ignoreOffer = !this.isPolite && offerCollision;
+      if (this.ignoreOffer) {
+        console.log('[CallManager] Perfect Negotiation: ignoring offer (impolite glare)');
+        return;
+      }
+
+      await ready.setRemoteDescription(new RTCSessionDescription(sdp));
       this.processedRemoteOfferSdp = offerSdp;
       await this.processPendingIceCandidates();
 
-      const answer = await pc.createAnswer();
-      // Enhance SDP with WhatsApp-grade HD Opus audio settings
+      this.makingOffer = true;
+      const answer = await ready.createAnswer();
       const enhancedSdp = optimizeOpusSdp(answer.sdp || '');
       const enhancedAnswer: RTCSessionDescriptionInit = { type: answer.type, sdp: enhancedSdp };
-      await pc.setLocalDescription(enhancedAnswer);
+      await ready.setLocalDescription(enhancedAnswer);
+      this.makingOffer = false;
 
       const answerPayload = { type: enhancedAnswer.type, sdp: enhancedAnswer.sdp };
 
       if (this.session.callId) {
-        // 1. Write answer to Firestore
-        FirebaseService.updateCallDoc(this.session.callId, {
-          answer: answerPayload,
-          status: 'connected',
-        }).catch(() => {});
+        FirebaseService.updateCallDoc(this.session.callId, { answer: answerPayload, status: 'connected' }).catch(() => {});
+        this.sendSignal('call:answer', { callId: this.session.callId, sdp: enhancedAnswer, targetUserId: this.session.partner?.id });
 
-        // 2. Send answer via WebSocket
-        this.sendSignal('call:answer', {
-          callId: this.session.callId,
-          sdp: enhancedAnswer,
-          targetUserId: this.session.partner?.id,
-        });
-
+        // Fallback: if ontrack hasn't fired yet, mark connected after a short delay
         setTimeout(() => {
           if (this.session.state === 'CONNECTING') {
             this.handleCallConnected();
           }
-        }, 300);
+        }, 500);
       }
     } catch (err) {
+      this.makingOffer = false;
       console.error('[CallManager] Error handling SDP offer:', err);
-      this.handleCallFailed('Erro ao responder oferta de áudio.');
+      this.handleCallFailed('Erro ao responder oferta.');
     } finally {
       this.processingRemoteOfferSdp = null;
     }
@@ -1281,7 +1399,7 @@ class CallManager {
             if (this.session.state === 'CONNECTING') {
               this.handleCallConnected();
             }
-          }, 300);
+          }, 500);
         }
       }
     } catch (err) {
@@ -1291,11 +1409,7 @@ class CallManager {
 
   private async handleReceivedIceCandidate(candidate: RTCIceCandidateInit) {
     try {
-      if (
-        this.peerConnection &&
-        this.peerConnection.remoteDescription &&
-        this.peerConnection.remoteDescription.type
-      ) {
+      if (this.peerConnection && this.peerConnection.remoteDescription && this.peerConnection.remoteDescription.type) {
         await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       } else {
         this.pendingIceCandidates.push(candidate);
@@ -1305,23 +1419,39 @@ class CallManager {
     }
   }
 
+  // --- Call lifecycle ---
+
   private handleCallConnected() {
-    if (this.session.state === 'CONNECTED') return;
+    if (this.session.state === 'CONNECTED' || this.session.state === 'ENDING') return;
     soundManager.stopCallingTone();
     soundManager.stopIncomingRing();
     soundManager.playCallConnected();
+    this.clearConnectingTimeout();
     this.updateState({ state: 'CONNECTED' });
     this.startDurationTimer();
+    this.requestWakeLock();
+
+    // Start adaptive quality monitoring
+    if (this.peerConnection && !this.qualityController) {
+      this.qualityController = new CallQualityController(this.peerConnection);
+      this.qualityController.start();
+    }
+
+    // Notify partner of our camera state
+    if (this.session.callId && this.currentUser) {
+      this.sendSignal('call:camera_state', {
+        callId: this.session.callId,
+        userId: this.currentUser.id,
+        isCameraOn: this.session.isCameraOn,
+      });
+    }
   }
 
   private handleCallFailed(reason: string) {
     soundManager.stopCallingTone();
     soundManager.stopIncomingRing();
     soundManager.playCallEnded();
-    this.updateState({
-      state: 'FAILED',
-      errorMessage: reason,
-    });
+    this.updateState({ state: 'FAILED', errorMessage: reason });
     this.cleanupMediaAndPeer();
     this.scheduleAutoReset(3000);
   }
@@ -1342,11 +1472,16 @@ class CallManager {
     }
   }
 
+  // --- Cleanup — releases ALL resources and prevents stale state ---
+
   private cleanupMediaAndPeer() {
     this.stopDurationTimer();
     this.clearIceRestartTimer();
+    this.clearConnectingTimeout();
     this.connectionRecoveryAttempts = 0;
     this.isRestartingIce = false;
+    this.makingOffer = false;
+    this.ignoreOffer = false;
     this.processedRemoteOfferSdp = null;
     this.processingRemoteOfferSdp = null;
 
@@ -1365,23 +1500,48 @@ class CallManager {
       this.candidatesUnsub = null;
     }
 
+    // Stop quality controller
+    if (this.qualityController) {
+      this.qualityController.stop();
+      this.qualityController = null;
+    }
+
+    // Release wake lock
+    this.releaseWakeLock();
+
+    // Stop all local tracks (camera + microphone)
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());
       this.localStream = null;
     }
 
+    // Close peer connection
     if (this.peerConnection) {
-      this.peerConnection.close();
+      this.peerConnection.ontrack = null;
+      this.peerConnection.onicecandidate = null;
+      this.peerConnection.onconnectionstatechange = null;
+      this.peerConnection.oniceconnectionstatechange = null;
+      this.peerConnection.onnegotiationneeded = null;
+      try {
+        this.peerConnection.close();
+      } catch (e) {}
       this.peerConnection = null;
     }
 
+    // Clear remote stream
+    this.remoteStream = null;
+    this.notifyStreams();
+
+    // Clear audio element
     if (this.remoteAudio) {
       this.remoteAudio.srcObject = null;
     }
   }
 
   private scheduleAutoReset(delayMs = 2000) {
-    setTimeout(() => {
+    this.clearAutoReset();
+    this.autoResetTimer = setTimeout(() => {
+      this.autoResetTimer = null;
       if (
         this.session.state === 'ENDED' ||
         this.session.state === 'REJECTED' ||
@@ -1393,8 +1553,16 @@ class CallManager {
     }, delayMs);
   }
 
+  private clearAutoReset() {
+    if (this.autoResetTimer) {
+      clearTimeout(this.autoResetTimer);
+      this.autoResetTimer = null;
+    }
+  }
+
   private resetToIdle() {
     this.cleanupMediaAndPeer();
+    this.clearAutoReset();
     this.session = {
       callId: null,
       state: 'IDLE',
@@ -1403,9 +1571,12 @@ class CallManager {
       isMuted: false,
       isSpeakerOn: true,
       isPartnerMuted: false,
+      isCameraOn: false,
+      isRemoteCameraOn: false,
       durationSeconds: 0,
     };
     this.notifyState();
+    this.notifyStreams();
   }
 
   private updateState(partial: Partial<RealCallSession>) {
@@ -1414,6 +1585,7 @@ class CallManager {
   }
 
   // --- Subscriptions ---
+
   public subscribe(listener: StateListener): () => void {
     this.stateListeners.add(listener);
     listener(this.session);

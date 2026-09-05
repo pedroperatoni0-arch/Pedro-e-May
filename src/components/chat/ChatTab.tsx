@@ -204,7 +204,7 @@ export const ChatTab: React.FC<ChatTabProps> = ({
                 callManager.startCall(partner);
               }}
               className="p-2 rounded-2xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-100 transition active:scale-95 flex items-center justify-center cursor-pointer shadow-2xs"
-              title="Iniciar Chamada de Voz"
+              title="Iniciar Chamada de Vídeo"
             >
               <Phone className="w-4 h-4 text-rose-500" />
             </button>

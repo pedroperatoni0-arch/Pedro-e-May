@@ -248,7 +248,7 @@ export const CoupleLinkSection: React.FC<CoupleLinkSectionProps> = ({
                   type="button"
                   onClick={handleStartVoiceCall}
                   className="p-2.5 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white rounded-xl transition shadow-xs cursor-pointer"
-                  title="Fazer chamada de voz"
+                  title="Fazer chamada de vídeo"
                 >
                   <Phone className="w-4 h-4" />
                 </button>

@@ -597,6 +597,7 @@ export default function App() {
         onSpeakerToggle={() => callManager.toggleSpeaker()}
         onAcceptCall={() => callManager.acceptCall()}
         onRejectCall={() => callManager.rejectCall()}
+        onCameraToggle={() => callManager.toggleCamera()}
       />
 
       {/* Level Up Celebration Modal */}
