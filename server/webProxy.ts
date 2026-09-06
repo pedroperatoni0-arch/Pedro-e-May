@@ -6,6 +6,29 @@ interface CookieStore {
 }
 const domainCookies = new Map<string, CookieStore>();
 
+function redactUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    const sensitiveKeys = /token|secret|password|passwd|authorization|signature|sig|key|expires|expiry/i;
+    for (const key of parsed.searchParams.keys()) {
+      if (sensitiveKeys.test(key)) {
+        parsed.searchParams.set(key, '[redacted]');
+      }
+    }
+    return parsed.toString();
+  } catch {
+    return value.length > 300 ? `${value.slice(0, 300)}...[truncated]` : value;
+  }
+}
+
+function getHostname(value: string): string {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return 'invalid-url';
+  }
+}
+
 function getCookieHeader(hostname: string): string {
   const store = domainCookies.get(hostname);
   if (!store) return '';
@@ -141,6 +164,22 @@ export async function handleWebProxy(req: Request, res: Response) {
 
     const finalUrl = response.url || parsedUrl.toString();
     const contentType = response.headers.get('content-type') || 'text/html';
+
+    console.info('[WebProxy] Request trace', {
+      method: req.method,
+      receivedUrl: redactUrl(targetUrl),
+      resolvedUrl: redactUrl(parsedUrl.toString()),
+      status: response.status,
+      responseUrl: redactUrl(finalUrl),
+      initialHostname: parsedUrl.hostname,
+      finalHostname: getHostname(finalUrl),
+      redirected: response.redirected,
+      cookieSent: Boolean(cookieString),
+      storedCookieNames: domainCookies.has(parsedUrl.hostname)
+        ? Object.keys(domainCookies.get(parsedUrl.hostname) || {})
+        : [],
+      setCookiePresent: Boolean(response.headers.get('set-cookie')),
+    });
 
     // Strip anti-framing and security headers
     res.status(response.status);

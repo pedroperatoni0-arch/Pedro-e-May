@@ -261,6 +261,19 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
     }
     // Web source: use playerUrl if available (e.g. plenoflu, vaiquecol), otherwise page url
     const rawTarget = session.media.playerUrl || session.media.url;
+    const isProxyTarget = rawTarget.startsWith('/api/cineminha/web-proxy') || (() => {
+      try {
+        const parsedTarget = new URL(rawTarget);
+        return parsedTarget.origin === window.location.origin && parsedTarget.pathname === '/api/cineminha/web-proxy';
+      } catch {
+        return false;
+      }
+    })();
+
+    if (isProxyTarget) {
+      return rawTarget;
+    }
+
     let target = rawTarget;
     if (!/^[a-z][a-z\d+.-]*:/i.test(rawTarget)) {
       try {
@@ -268,9 +281,6 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
       } catch {
         target = rawTarget;
       }
-    }
-    if (target.startsWith('/api/cineminha/web-proxy')) {
-      return target;
     }
     let proxied = `/api/cineminha/web-proxy?url=${encodeURIComponent(target)}`;
     if (session.media.url && session.media.playerUrl && session.media.url !== session.media.playerUrl) {
