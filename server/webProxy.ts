@@ -83,6 +83,14 @@ export async function handleWebProxy(req: Request, res: Response) {
     return res.status(400).send('URL é obrigatória.');
   }
 
+  console.info('[WebProxy] Incoming request', {
+    method: req.method,
+    receivedUrl: redactUrl(targetUrl),
+    ref: req.query.ref ? redactUrl(req.query.ref as string) : null,
+    requestReferer: req.headers.referer ? redactUrl(req.headers.referer) : null,
+    timestamp: new Date().toISOString(),
+  });
+
   try {
     let refHeader = (req.query.ref as string) || '';
     if (!refHeader && req.headers.referer) {
@@ -179,6 +187,8 @@ export async function handleWebProxy(req: Request, res: Response) {
         ? Object.keys(domainCookies.get(parsedUrl.hostname) || {})
         : [],
       setCookiePresent: Boolean(response.headers.get('set-cookie')),
+      locationHeader: response.headers.get('location') ? '[present-after-fetch]' : null,
+      timestamp: new Date().toISOString(),
     });
 
     // Strip anti-framing and security headers

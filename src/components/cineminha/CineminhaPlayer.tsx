@@ -289,6 +289,31 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
     return proxied;
   }, [session.media]);
 
+  useEffect(() => {
+    if (!session.media || session.media.sourceType !== 'site') return;
+
+    console.info('[CineminhaRuntime] Player URL trace', {
+      mediaUrl: session.media.url,
+      detectedPlayerUrl: session.media.playerUrl || null,
+      iframeUrl: embedIframeSrc,
+      timestamp: new Date().toISOString(),
+    });
+  }, [embedIframeSrc, session.media]);
+
+  const handlePlayerLoad = () => {
+    console.info('[CineminhaRuntime] Player iframe load', {
+      iframeUrl: embedIframeSrc,
+      timestamp: new Date().toISOString(),
+    });
+  };
+
+  const handlePlayerError = () => {
+    console.error('[CineminhaRuntime] Player iframe error', {
+      iframeUrl: embedIframeSrc,
+      timestamp: new Date().toISOString(),
+    });
+  };
+
   const handleReloadPlayer = () => {
     soundManager.playPop();
     setIframeKey((prev) => prev + 1);
@@ -362,6 +387,8 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
                 key={`${embedIframeSrc}_${iframeKey}`}
                 src={embedIframeSrc}
                 title={session.media.title}
+                onLoad={handlePlayerLoad}
+                onError={handlePlayerError}
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups allow-popups-to-escape-sandbox allow-modals"
                 allowFullScreen
