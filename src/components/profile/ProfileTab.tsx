@@ -1,7 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { UserAccount } from '../../types';
 import { calculateUserXpRequired } from '../../utils/gamification';
+import { soundManager } from '../../utils/audio';
+import { callManager } from '../../services/callManager';
+import confetti from 'canvas-confetti';
 import {
   Volume2,
   VolumeX,
@@ -11,12 +14,15 @@ import {
   Swords,
   LogOut,
 } from 'lucide-react';
+import { CoupleHeaderCard } from './CoupleHeaderCard';
 import { CoupleLinkSection } from './CoupleLinkSection';
 
 interface ProfileTabProps {
   user: UserAccount;
   partner: UserAccount | null;
-  onLinkPartner: (partnerPersonalId: string) => void;
+  onLinkPartner?: (partnerPersonalId: string) => void;
+  onLinkSuccess?: (partner: UserAccount) => void;
+  onUpdateUser?: (updated: UserAccount) => void;
   onUnlinkPartner: () => void;
   onToggleSound: () => void;
   onLogout?: () => void;
@@ -27,41 +33,107 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   user,
   partner,
   onLinkPartner,
+  onLinkSuccess,
   onUnlinkPartner,
   onToggleSound,
   onLogout,
-  showToast = () => {},
+  showToast = (_msg: string) => {},
 }) => {
+  const [sentNudge, setSentNudge] = useState(false);
+
   const personLevel = user.level || 1;
   const personXp = user.xp || 0;
   const xpRequired = calculateUserXpRequired(personLevel);
   const xpPercent = Math.min(100, Math.max(0, Math.round((personXp / xpRequired) * 100)));
 
+  // Voice Call
+  const handleStartVoiceCall = async () => {
+    if (!partner) return;
+    const ok = await callManager.startCall(partner, 'audio');
+    if (!ok) {
+      showToast('Não foi possível iniciar a chamada de voz.');
+    }
+  };
+
+  // Video Call
+  const handleStartVideoCall = async () => {
+    if (!partner) return;
+    const ok = await callManager.startCall(partner, 'video');
+    if (!ok) {
+      showToast('Não foi possível iniciar a chamada de vídeo.');
+    }
+  };
+
+  // Send Love Nudge
+  const handleSendLoveNudge = () => {
+    if (!partner) return;
+    soundManager.playPop();
+    setSentNudge(true);
+    confetti({
+      particleCount: 35,
+      spread: 60,
+      origin: { y: 0.65 },
+      colors: ['#f43f5e', '#ec4899', '#ffd700'],
+    });
+    showToast(`Carinho enviado para ${partner.username}! ❤️✨`);
+    setTimeout(() => setSentNudge(false), 3000);
+  };
+
+  const handleLinkSuccessInternal = (partnerAccount: UserAccount) => {
+    if (onLinkSuccess) {
+      onLinkSuccess(partnerAccount);
+    } else if (onLinkPartner) {
+      onLinkPartner(user.personalId);
+    }
+  };
+
+  const scrollToLinkSection = () => {
+    const el = document.getElementById('couple-link-section-wrapper');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
   return (
     <div id="profile-tab-container" className="space-y-4 pb-28">
-      {/* 1. User Header Profile Card */}
-      <div className="bg-white/95 backdrop-blur-md rounded-3xl p-5 border border-rose-100 shadow-xs text-center relative overflow-hidden">
-        <div className="absolute -top-10 -right-10 w-32 h-32 bg-rose-200/30 rounded-full blur-xl pointer-events-none" />
+      {/* 1. Novo Cabeçalho do Casal (Fotos Lado a Lado + Anéis Entrelaçados + Animação de Corações + 3 Cards de Estatísticas) */}
+      <CoupleHeaderCard
+        user={user}
+        partner={partner}
+        onVoiceCall={handleStartVoiceCall}
+        onVideoCall={handleStartVideoCall}
+        onSendNudge={handleSendLoveNudge}
+        sentNudge={sentNudge}
+        onStartLinking={scrollToLinkSection}
+      />
 
-        {/* User Avatar */}
-        <div className="relative inline-block mx-auto mb-2">
-          <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-rose-400 via-pink-500 to-rose-600 flex items-center justify-center text-4xl shadow-md border-2 border-white text-white">
-            {user.avatar}
+      {/* 2. Área de Vínculo de Contas / Gerenciamento (Sem badge verde, sem exibir ID do parceiro) */}
+      <div id="couple-link-section-wrapper">
+        <CoupleLinkSection
+          user={user}
+          partner={partner}
+          onLinkSuccess={handleLinkSuccessInternal}
+          onUnlinkPartner={onUnlinkPartner}
+          showToast={showToast}
+        />
+      </div>
+
+      {/* 3. Progresso Pessoal & Estatísticas da Arena */}
+      <div className="bg-white/95 backdrop-blur-md rounded-3xl p-4 border border-rose-100 shadow-xs space-y-3.5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Swords className="w-4 h-4 text-rose-500" />
+            <h3 className="text-sm font-bold text-slate-800 font-display">Seu Progresso & Arena</h3>
           </div>
-          <span className="absolute -bottom-2 -right-1 px-2.5 py-0.5 bg-purple-50 text-purple-700 font-extrabold text-[10px] rounded-full shadow-xs border border-purple-100">
+          <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-100">
             Nível {personLevel}
           </span>
         </div>
 
-        <h2 className="text-lg font-black text-slate-800 font-display">{user.username}</h2>
-        <p className="text-xs text-slate-500 font-medium">
-          {user.customStatus || 'Focado na rotina e nas disputas da Arena! ⚔️'}
-        </p>
-
-        {/* Level XP Progress Bar (Lilac 💜) */}
-        <div className="mt-4 pt-3 border-t border-slate-100 text-left space-y-1.5">
+        {/* Level XP Progress Bar */}
+        <div className="space-y-1.5">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-extrabold text-slate-700">Nível Pessoal {personLevel}</span>
+            <span className="font-bold text-slate-600">Experiência Pessoal</span>
             <span className="font-bold text-purple-700">{personXp} / {xpRequired} XP</span>
           </div>
           <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden p-0.5 border border-slate-200/60">
@@ -73,27 +145,9 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             />
           </div>
         </div>
-      </div>
 
-      {/* 2. Couple Link Section (Interactive & Real-time) */}
-      <CoupleLinkSection
-        user={user}
-        partner={partner}
-        onLinkSuccess={() => {
-          onLinkPartner(user.personalId);
-        }}
-        onUnlinkPartner={onUnlinkPartner}
-        showToast={showToast}
-      />
-
-      {/* 3. Arena Stats Card */}
-      <div className="bg-white/95 backdrop-blur-md rounded-3xl p-4 border border-rose-100 shadow-xs space-y-3">
-        <div className="flex items-center gap-2">
-          <Swords className="w-4 h-4 text-rose-500" />
-          <h3 className="text-sm font-bold text-slate-800 font-display">Estatísticas da Arena</h3>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2.5">
+        {/* Arena Wins & Active Streak */}
+        <div className="grid grid-cols-2 gap-2.5 pt-1">
           <div className="p-3 bg-rose-50/70 rounded-2xl border border-rose-100 flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-rose-500 text-white flex items-center justify-center">
               <Trophy className="w-4 h-4" />
@@ -102,7 +156,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
               <span className="text-lg font-black text-rose-700 font-display block leading-tight">
                 {user.arenaWins}
               </span>
-              <span className="text-[10px] font-bold text-slate-500">Vitórias em Disputas</span>
+              <span className="text-[10px] font-bold text-slate-500">Vitórias na Arena</span>
             </div>
           </div>
 
@@ -120,7 +174,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
         </div>
       </div>
 
-      {/* 5. App Preferences & Account */}
+      {/* 4. Preferências do Aplicativo & Conta */}
       <div className="bg-white/95 backdrop-blur-md rounded-3xl p-4 border border-rose-100 shadow-xs space-y-3">
         <div className="flex items-center gap-2">
           <Settings className="w-4 h-4 text-slate-600" />

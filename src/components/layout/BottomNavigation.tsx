@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Home, CalendarDays, Swords, MessageCircleHeart, User } from 'lucide-react';
+import { Home, CalendarDays, Swords, MessageCircleHeart, Users } from 'lucide-react';
 
 export type TabType = 'home' | 'routine' | 'challenges' | 'chat' | 'profile';
 
@@ -42,8 +42,8 @@ export const BottomNavigation: React.FC<BottomNavigationProps> = ({
     },
     {
       id: 'profile',
-      label: 'Perfil',
-      icon: <User className="w-5 h-5" />,
+      label: 'Casal',
+      icon: <Users className="w-5 h-5" />,
     },
   ];
 

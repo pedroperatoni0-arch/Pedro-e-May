@@ -173,3 +173,59 @@ export interface RealCallSession {
   errorMessage?: string;
 }
 
+// 🎬 CINEMINHA / WATCH PARTY TYPES
+export type CineminhaSourceType = 'site' | 'drive';
+
+export interface CineminhaMedia {
+  sourceType: CineminhaSourceType;
+  title: string;
+  url: string;
+  playerUrl?: string;
+  driveFileId?: string;
+  poster?: string;
+  duration?: number;
+}
+
+export interface CineminhaPlayback {
+  playing: boolean;
+  position: number; // in seconds
+  updatedAt: number; // ms timestamp
+  serverTimestamp?: number;
+}
+
+export type CineminhaQuality = 'auto' | '1080p' | '720p' | '480p';
+
+export interface CoupleWatchSession {
+  active: boolean;
+  coupleId: string;
+  hostUserId: string;
+  hostUsername: string;
+  media: CineminhaMedia | null;
+  playback: CineminhaPlayback;
+  quality: CineminhaQuality;
+  updatedAt: number;
+}
+
+export type CineminhaSyncAction =
+  | 'play'
+  | 'pause'
+  | 'seek'
+  | 'mediaChanged'
+  | 'qualityChanged'
+  | 'sessionStarted'
+  | 'sessionEnded'
+  | 'syncPing';
+
+export interface CineminhaSyncPayload {
+  coupleId: string;
+  action: CineminhaSyncAction;
+  userId: string;
+  username: string;
+  position?: number;
+  playing?: boolean;
+  media?: CineminhaMedia | null;
+  quality?: CineminhaQuality;
+  clientTimestamp: number;
+  serverTimestamp?: number;
+}
+

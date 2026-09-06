@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Task, ChatMessage, DailyHistoryRecord, ArenaDailyMatch, ArenaSeason, FlashChallenge, TaskStatus } from '../src/types';
+import { Task, ChatMessage, DailyHistoryRecord, ArenaDailyMatch, ArenaSeason, FlashChallenge, TaskStatus, CoupleWatchSession, CineminhaMedia, CineminhaPlayback, CineminhaQuality } from '../src/types';
 import { userStore } from './userStore';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -411,6 +411,85 @@ class DataStore {
   public getArenaHistory(userId: string): ArenaDailyMatch[] {
     this.ensureLoaded();
     return this.arenaHistory.filter(m => m.id.includes(userId) || true).slice(-14);
+  }
+
+  // --- 🎬 CINEMINHA / WATCH PARTY METHODS ---
+  private watchSessions: Map<string, CoupleWatchSession> = new Map();
+
+  public getWatchSession(coupleId: string): CoupleWatchSession {
+    let session = this.watchSessions.get(coupleId);
+    if (!session) {
+      session = {
+        active: false,
+        coupleId,
+        hostUserId: '',
+        hostUsername: '',
+        media: null,
+        playback: {
+          playing: false,
+          position: 0,
+          updatedAt: Date.now(),
+          serverTimestamp: Date.now(),
+        },
+        quality: 'auto',
+        updatedAt: Date.now(),
+      };
+      this.watchSessions.set(coupleId, session);
+    }
+    return session;
+  }
+
+  public startWatchSession(coupleId: string, hostUserId: string, hostUsername: string): CoupleWatchSession {
+    const existing = this.getWatchSession(coupleId);
+    const updated: CoupleWatchSession = {
+      ...existing,
+      active: true,
+      hostUserId,
+      hostUsername,
+      updatedAt: Date.now(),
+      playback: {
+        ...existing.playback,
+        serverTimestamp: Date.now(),
+        updatedAt: Date.now(),
+      },
+    };
+    this.watchSessions.set(coupleId, updated);
+    return updated;
+  }
+
+  public updateWatchSession(coupleId: string, updates: Partial<CoupleWatchSession>): CoupleWatchSession {
+    const existing = this.getWatchSession(coupleId);
+    const updated: CoupleWatchSession = {
+      ...existing,
+      ...updates,
+      updatedAt: Date.now(),
+      playback: updates.playback
+        ? {
+            ...existing.playback,
+            ...updates.playback,
+            serverTimestamp: Date.now(),
+          }
+        : existing.playback,
+    };
+    this.watchSessions.set(coupleId, updated);
+    return updated;
+  }
+
+  public endWatchSession(coupleId: string): CoupleWatchSession {
+    const existing = this.getWatchSession(coupleId);
+    const updated: CoupleWatchSession = {
+      ...existing,
+      active: false,
+      playback: {
+        ...existing.playback,
+        playing: false,
+        serverTimestamp: Date.now(),
+        updatedAt: Date.now(),
+      },
+      updatedAt: Date.now(),
+    };
+    this.watchSessions.set(coupleId, updated);
+    return updated;
   }
 }
 

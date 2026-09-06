@@ -5,6 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import { CallSignalingServer } from './server/callSignaling';
 import { userStore } from './server/userStore';
 import { dataStore } from './server/dataStore';
+import { handleWebProxy } from './server/webProxy';
 
 async function startServer() {
   const app = express();
@@ -12,6 +13,7 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
 
   // Attach WebSocket Signaling Server for WebRTC Voice Calling & Real-Time Sync
   const signalingServer = new CallSignalingServer(server);
@@ -364,6 +366,119 @@ async function startServer() {
     const scores = dataStore.calculateArenaScores(user.id, partnerId);
     res.json({ success: true, scores });
   });
+
+  // --- 🎬 CINEMINHA / WATCH PARTY ENDPOINTS ---
+  const getCoupleId = (userId: string, partnerId: string | null) => {
+    if (!partnerId) return userId;
+    return [userId, partnerId].sort().join('_');
+  };
+
+  // 17. Get current Cineminha session for couple
+  app.get('/api/cineminha/session', authMiddleware, (req, res) => {
+    const user = (req as any).user;
+    const freshUser = userStore.findById(user.id);
+    const partnerId = freshUser?.partnerId && freshUser.partnerStatus === 'connected' ? freshUser.partnerId : null;
+    const coupleId = getCoupleId(user.id, partnerId);
+    const session = dataStore.getWatchSession(coupleId);
+    res.json({ success: true, session });
+  });
+
+  // 18. Start Cineminha session (caller becomes host)
+  app.post('/api/cineminha/start', authMiddleware, (req, res) => {
+    const user = (req as any).user;
+    const freshUser = userStore.findById(user.id);
+    const partnerId = freshUser?.partnerId && freshUser.partnerStatus === 'connected' ? freshUser.partnerId : null;
+    const coupleId = getCoupleId(user.id, partnerId);
+
+    const session = dataStore.startWatchSession(coupleId, user.id, user.username);
+
+    // Broadcast to partner that Cineminha session started
+    if (partnerId) {
+      signalingServer.broadcastCoupleEvent(user.id, partnerId, 'cineminha:started', {
+        session,
+        starterId: user.id,
+        starterName: user.username,
+      });
+    }
+
+    res.json({ success: true, session });
+  });
+
+  // 19. Sync Cineminha playback state (play, pause, seek, mediaChanged, qualityChanged)
+  app.post('/api/cineminha/sync', authMiddleware, (req, res) => {
+    const user = (req as any).user;
+    const freshUser = userStore.findById(user.id);
+    const partnerId = freshUser?.partnerId && freshUser.partnerStatus === 'connected' ? freshUser.partnerId : null;
+    const coupleId = getCoupleId(user.id, partnerId);
+
+    const { action, position, playing, media, quality, clientTimestamp } = req.body;
+    const serverTimestamp = Date.now();
+
+    const currentSession = dataStore.getWatchSession(coupleId);
+    const updates: any = {};
+
+    if (action === 'mediaChanged' && media !== undefined) {
+      updates.media = media;
+      updates.playback = {
+        playing: false,
+        position: 0,
+        updatedAt: serverTimestamp,
+        serverTimestamp,
+      };
+    } else if (action === 'qualityChanged' && quality !== undefined) {
+      updates.quality = quality;
+    } else if (action === 'play' || action === 'pause' || action === 'seek') {
+      updates.playback = {
+        playing: playing !== undefined ? playing : currentSession.playback.playing,
+        position: position !== undefined ? position : currentSession.playback.position,
+        updatedAt: serverTimestamp,
+        serverTimestamp,
+      };
+    }
+
+    const updatedSession = dataStore.updateWatchSession(coupleId, updates);
+
+    const syncPayload = {
+      coupleId,
+      action,
+      userId: user.id,
+      username: user.username,
+      position: updatedSession.playback.position,
+      playing: updatedSession.playback.playing,
+      media: updatedSession.media,
+      quality: updatedSession.quality,
+      clientTimestamp: clientTimestamp || serverTimestamp,
+      serverTimestamp,
+    };
+
+    if (partnerId) {
+      signalingServer.broadcastCoupleEvent(user.id, partnerId, 'cineminha:sync', syncPayload);
+    }
+
+    res.json({ success: true, session: updatedSession, syncPayload });
+  });
+
+  // 20. End Cineminha session
+  app.post('/api/cineminha/end', authMiddleware, (req, res) => {
+    const user = (req as any).user;
+    const freshUser = userStore.findById(user.id);
+    const partnerId = freshUser?.partnerId && freshUser.partnerStatus === 'connected' ? freshUser.partnerId : null;
+    const coupleId = getCoupleId(user.id, partnerId);
+
+    const session = dataStore.endWatchSession(coupleId);
+
+    if (partnerId) {
+      signalingServer.broadcastCoupleEvent(user.id, partnerId, 'cineminha:ended', {
+        session,
+        endedBy: user.id,
+      });
+    }
+
+    res.json({ success: true, session });
+  });
+
+  // 21. Cineminha In-App Web Browser Proxy (strips X-Frame-Options/CSP for watch party navigation)
+  app.all('/api/cineminha/web-proxy', handleWebProxy);
 
   // ICE / STUN & TURN Servers Configuration
   app.get('/api/webrtc/ice-servers', (req, res) => {

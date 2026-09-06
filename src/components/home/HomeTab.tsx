@@ -1,22 +1,15 @@
 import React from 'react';
 import { motion } from 'motion/react';
 import { UserAccount, Task } from '../../types';
-import { calculateUserXpRequired, calculateArenaScore, getArenaStatusMessage } from '../../utils/gamification';
+import { calculateUserXpRequired, calculateArenaScore } from '../../utils/gamification';
 import { getDailyCuteQuote } from '../../data/motivationalQuotes';
 import { TaskHeartCheckButton } from '../routine/TaskHeartCheckButton';
-import { ArenaEnergyDisputeBar } from '../arena/ArenaEnergyDisputeBar';
+import { CoupleActivityShortcuts } from './CoupleActivityShortcuts';
 import {
   Flame,
   Sparkles,
-  CheckCircle2,
   Clock,
-  Heart,
   ChevronRight,
-  Swords,
-  Zap,
-  Check,
-  Trophy,
-  Users
 } from 'lucide-react';
 import { getTodayDateString, getTodayDayOfWeek } from '../../utils/storage';
 
@@ -26,55 +19,48 @@ interface HomeTabProps {
   tasks: Task[];
   partnerTasks: Task[];
   onNavigateToRoutine: () => void;
-  onNavigateToArena: () => void;
-  onNavigateToChat: () => void;
-  onToggleTaskToday: (taskId: string) => void;
+  onNavigateToArena?: () => void;
+  onNavigateToChallenges?: () => void;
+  onNavigateToProfile?: () => void;
+  onNavigateToChat?: () => void;
+  onOpenCineminha?: () => void;
+  onToggleTask?: (taskId: string) => void;
+  onToggleTaskToday?: (taskId: string) => void;
+  showToast?: (message: string) => void;
 }
 
 export const HomeTab: React.FC<HomeTabProps> = ({
   user,
   partner,
   tasks,
-  partnerTasks,
+  partnerTasks: _partnerTasks,
   onNavigateToRoutine,
-  onNavigateToArena,
-  onNavigateToChat,
+  onNavigateToArena: _onNavigateToArena,
+  onNavigateToChallenges: _onNavigateToChallenges,
+  onNavigateToProfile: _onNavigateToProfile,
+  onNavigateToChat: _onNavigateToChat,
+  onOpenCineminha,
+  onToggleTask,
   onToggleTaskToday,
+  showToast,
 }) => {
   const todayStr = getTodayDateString();
   const todayDay = getTodayDayOfWeek();
   const cuteQuote = getDailyCuteQuote(todayStr);
 
   const safeTasks = Array.isArray(tasks) ? tasks : [];
-  const safePartnerTasks = Array.isArray(partnerTasks) ? partnerTasks : [];
+  const handleToggle = onToggleTask || onToggleTaskToday || (() => {});
 
   // User Today's Tasks & Routine Percentage
   const todayUserTasks = safeTasks.filter(t => t && Array.isArray(t.days) && t.days.includes(todayDay));
   const completedUserTasks = todayUserTasks.filter(t => t && Array.isArray(t.completedDates) && t.completedDates.includes(todayStr));
-  const pendingUserTasks = todayUserTasks.filter(t => t && (!Array.isArray(t.completedDates) || !t.completedDates.includes(todayStr)));
   const userScore = calculateArenaScore(completedUserTasks.length, todayUserTasks.length);
 
-  // Partner Today's Tasks & Score
-  const todayPartnerTasks = partner ? safePartnerTasks.filter(t => t && Array.isArray(t.days) && t.days.includes(todayDay)) : [];
-  const completedPartnerTasks = todayPartnerTasks.filter(t => t && Array.isArray(t.completedDates) && t.completedDates.includes(todayStr));
-  const partnerScore = partner
-    ? calculateArenaScore(completedPartnerTasks.length, todayPartnerTasks.length)
-    : 75; // simulated partner score if not yet linked
-
-  const partnerName = partner ? partner.username : 'Ela';
-
-  // Person / User Progression (Independent from Pet)
+  // Person / User Progression
   const personLevel = user.level || 1;
   const personXp = user.xp || 0;
   const personXpRequired = calculateUserXpRequired(personLevel);
   const personXpPercent = Math.min(100, Math.max(0, Math.round((personXp / personXpRequired) * 100)));
-
-  // Status message for the Arena
-  const arenaStatus = getArenaStatusMessage(userScore, partnerScore, partnerName, 'Você');
-
-  // Calculate dispute ratio for visual bar (0 to 100 on each side)
-  const totalScoreSum = userScore + partnerScore;
-  const userRatio = totalScoreSum > 0 ? (userScore / totalScoreSum) * 100 : 50;
 
   return (
     <div id="home-tab-container" className="space-y-4 pb-24">
@@ -165,92 +151,19 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         </div>
       </div>
 
-      {/* 2. ⚔️ CARD PRINCIPAL DA ARENA (Clean White + Rose & Lilac Accents) */}
-      <div
-        id="home-arena-challenge-card"
-        onClick={onNavigateToArena}
-        className="bg-white/95 backdrop-blur-md rounded-3xl p-4 sm:p-5 border border-rose-100 shadow-xs relative overflow-hidden cursor-pointer group hover:border-rose-200 transition-all"
-      >
-        {/* Header: Title & Navigation Hint */}
-        <div className="flex items-center justify-between mb-3.5 relative z-10">
-          <div className="flex items-center gap-2.5">
-            <span className="w-8 h-8 rounded-xl bg-rose-50 text-rose-500 border border-rose-100 flex items-center justify-center">
-              <Swords className="w-4 h-4 text-rose-500" />
-            </span>
-            <div>
-              <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-600 block">
-                Arena do Casal
-              </span>
-              <h3 className="text-sm font-bold text-slate-800 font-display">
-                Disputa de Hoje
-              </h3>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1 text-xs font-bold text-rose-600 group-hover:text-rose-700 transition">
-            <span>Ver Arena</span>
-            <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-          </div>
-        </div>
-
-        {/* Scores Board: Você (Rose) vs Ela (Lilac) */}
-        <div className="grid grid-cols-2 gap-3 mb-3.5 relative z-10">
-          {/* User Score Column */}
-          <div className="bg-rose-50/50 rounded-2xl p-3 border border-rose-100/90 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-xl">{user.avatar}</span>
-              <div>
-                <span className="text-[10px] font-extrabold text-slate-500 block uppercase">Você</span>
-                <span className="text-xs font-bold text-slate-700">{completedUserTasks.length}/{todayUserTasks.length} feitos</span>
-              </div>
-            </div>
-            <div className="text-right">
-              <span className="text-xl font-black text-rose-600 font-display">{Math.round(userScore)}</span>
-              <span className="text-[10px] font-bold text-rose-400 block">pontos</span>
-            </div>
-          </div>
-
-          {/* Partner Score Column */}
-          <div className="bg-purple-50/50 rounded-2xl p-3 border border-purple-100/90 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-xl">{partner ? partner.avatar : '🌸'}</span>
-              <div>
-                <span className="text-[10px] font-extrabold text-slate-500 block uppercase">{partnerName}</span>
-                <span className="text-xs font-bold text-slate-700">{completedPartnerTasks.length}/{todayPartnerTasks.length || 4} feitos</span>
-              </div>
-            </div>
-            <div className="text-right">
-              <span className="text-xl font-black text-purple-600 font-display">{Math.round(partnerScore)}</span>
-              <span className="text-[10px] font-bold text-purple-400 block">pontos</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Dynamic Animated Dispute Bar (Two Energy Beams Clashing into a Living Heart) */}
-        <div className="relative z-10 py-1">
-          <ArenaEnergyDisputeBar
-            userScore={userScore}
-            partnerScore={partnerScore}
-            userName="Você"
-            partnerName={partnerName}
-            userAvatar={user.avatar}
-            partnerAvatar={partner ? partner.avatar : '🌸'}
-            size="md"
-            showLabels={false}
-          />
-        </div>
-
-        {/* Dynamic Status / Encouragement Footer */}
-        <div className="mt-3 flex items-center justify-between text-xs pt-2.5 border-t border-slate-100">
-          <div className="flex items-center gap-1.5 font-medium text-slate-700">
-            <span className="text-sm">{arenaStatus.icon}</span>
-            <span className="truncate max-w-[220px] sm:max-w-none">{arenaStatus.text}</span>
-          </div>
-          <span className="text-[10px] font-extrabold text-purple-700 bg-purple-50 px-2.5 py-0.5 rounded-full border border-purple-100 shrink-0">
-            Em andamento
-          </span>
-        </div>
-      </div>
+      {/* 2. 🎬 NOVA ÁREA NA TELA INICIAL: ATALHOS DE ATIVIDADES DO CASAL (Cineminha, Leitura, Games, Disciplina) */}
+      <CoupleActivityShortcuts
+        onSelectActivity={(id) => {
+          if (id === 'movies' && onOpenCineminha) {
+            onOpenCineminha();
+          } else if (showToast) {
+            if (id === 'reading') showToast('Leitura • Em breve leituras a dois! 📖✨');
+            else if (id === 'games') showToast('Games • Em breve jogatinas a dois! 🎮👾');
+            else if (id === 'discipline') showToast('Disciplina • Em breve rotina a dois! 🎯📋');
+          }
+        }}
+        showToast={showToast}
+      />
 
       {/* 3. TODAY'S PENDING TASKS QUICK LIST */}
       <div className="bg-white/95 backdrop-blur-md rounded-3xl p-4 border border-rose-100 shadow-xs space-y-3">
@@ -261,7 +174,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           </div>
           <button
             onClick={onNavigateToRoutine}
-            className="text-xs font-bold text-rose-600 hover:text-rose-700 flex items-center gap-0.5"
+            className="text-xs font-bold text-rose-600 hover:text-rose-700 flex items-center gap-0.5 cursor-pointer"
           >
             <span>Ver Todas</span>
             <ChevronRight className="w-3.5 h-3.5" />
@@ -273,7 +186,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             <p className="text-xs text-slate-600 mb-2">Nenhuma tarefa agendada para hoje.</p>
             <button
               onClick={onNavigateToRoutine}
-              className="px-3 py-1.5 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl transition"
+              className="px-3 py-1.5 bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs rounded-xl transition cursor-pointer"
             >
               Organizar Rotina
             </button>
@@ -302,8 +215,8 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                   <div className="shrink-0">
                     <TaskHeartCheckButton
                       isCompleted={isDone}
-                      onComplete={() => onToggleTaskToday(task.id)}
-                      onClick={() => onToggleTaskToday(task.id)}
+                      onComplete={() => handleToggle(task.id)}
+                      onClick={() => handleToggle(task.id)}
                     />
                   </div>
                 </div>

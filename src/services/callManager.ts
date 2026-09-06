@@ -2,22 +2,23 @@ import { RealCallSession, CallState, CallPartnerInfo, UserAccount, VideoQualityL
 import { DEFAULT_ICE_SERVERS } from './webrtcConfig';
 import { FirebaseService } from './firebaseService';
 import { Unsubscribe } from 'firebase/firestore';
+import { VideoQualityController, QUALITY_STEPS, START_STEP } from './videoQualityController';
 
 type StateListener = (session: RealCallSession) => void;
 type ErrorListener = (error: string) => void;
-export type CoupleEventType = 'couple:linked' | 'couple:unlinked' | 'tasks:updated' | 'chat:message' | 'chat:read' | 'arena:updated' | 'user:updated';
+export type CoupleEventType = 'couple:linked' | 'couple:unlinked' | 'tasks:updated' | 'chat:message' | 'chat:read' | 'arena:updated' | 'user:updated' | 'cineminha:sync' | 'cineminha:started' | 'cineminha:ended';
 export type CoupleEventListener = (event: { type: CoupleEventType; payload: any }) => void;
 
 /**
- * Optimizes the SDP to configure Opus audio and high-clarity, ultra-low latency, fluid HD video:
+ * Optimizes the SDP to configure Opus audio and fluid adaptive video:
  * Audio:
  * - 32 kbps HD Speech Bitrate with VBR and inband FEC (WhatsApp voice standard)
  * - 20ms frame delivery (ptime=20)
  * Video:
- * - 4.5 Mbps transport bandwidth (b=AS:4500, b=TIAS:4500000)
- * - Guaranteed min 2.5 Mbps to eliminate pixelation and macroblocking during movement (x-google-min-bitrate=2500)
- * - Immediate HD startup at 3.5 Mbps (x-google-start-bitrate=3500)
- * - Peak 5.0 Mbps for sudden high-motion scenes (x-google-max-bitrate=5000)
+ * - 1.4 Mbps peak transport bandwidth (b=AS:1400, b=TIAS:1400000)
+ * - Start bitrate: 600 kbps for smooth start without initial packet bursts
+ * - Min bitrate: 150 kbps for extreme resilience on poor mobile signals
+ * - Max bitrate: 1400 kbps to prevent bufferbloat and latency accumulation
  */
 function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
   if (!rawSdp) return rawSdp;
@@ -52,9 +53,9 @@ function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
     }
   }
 
-  // 2. High-Definition 720p 30 FPS Video SDP Optimization (WhatsApp-grade, zero blur on motion)
+  // 2. High-Definition 30 FPS Fluid Video SDP Optimization
   if (isVideo) {
-    // Inject b=AS:4500 (4.5 Mbps) and b=TIAS:4500000 directly under m=video section
+    // Inject b=AS:1400 (1.4 Mbps) and b=TIAS:1400000 directly under m=video section
     const videoIdx = lines.findIndex((l) => l.startsWith('m=video'));
     if (videoIdx !== -1) {
       let insertIdx = videoIdx + 1;
@@ -64,7 +65,7 @@ function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
       while (insertIdx < lines.length && lines[insertIdx].startsWith('b=')) {
         lines.splice(insertIdx, 1);
       }
-      lines.splice(insertIdx, 0, 'b=AS:4500', 'b=TIAS:4500000');
+      lines.splice(insertIdx, 0, 'b=AS:1400', 'b=TIAS:1400000');
     }
 
     // Enhance video codec fmtp lines with Google min/start/max bitrate params
@@ -85,7 +86,7 @@ function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
             .replace(/;?x-google-min-bitrate=\d+/g, '')
             .replace(/;?x-google-start-bitrate=\d+/g, '')
             .replace(/;?x-google-max-bitrate=\d+/g, '');
-          return `${cleaned};x-google-min-bitrate=2500;x-google-start-bitrate=3500;x-google-max-bitrate=5000`;
+          return `${cleaned};x-google-min-bitrate=150;x-google-start-bitrate=600;x-google-max-bitrate=1400`;
         }
         return line;
       });
@@ -96,7 +97,7 @@ function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
           lines.splice(
             rtpmapIdx + 1,
             0,
-            `a=fmtp:${pt} x-google-min-bitrate=2500;x-google-start-bitrate=3500;x-google-max-bitrate=5000`
+            `a=fmtp:${pt} x-google-min-bitrate=150;x-google-start-bitrate=600;x-google-max-bitrate=1400`
           );
         }
       }
@@ -106,50 +107,40 @@ function optimizeWebRtcSdp(rawSdp: string, isVideo: boolean = false): string {
   return lines.join('\r\n');
 }
 
-// WebRTC Audio Constraints for Crystal-Clear, Ultra-Low Latency, Zero-Echo Voice Calls
+const VOIP_AUDIO = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  channelCount: 1,
+  sampleRate: 48000,
+} as const;
+
+// WebRTC Audio Constraints for Crystal-Clear Voice Calls
 const OPTIMAL_VOIP_AUDIO_CONSTRAINTS: MediaStreamConstraints = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-    sampleRate: 48000,
-  },
+  audio: { ...VOIP_AUDIO },
   video: false,
 };
 
 // WebRTC Video & Audio Constraints optimized for real-time mobile camera capture:
-// - Native 720p HD (1280x720) without restrictive max/min limits that clash with portrait (vertical) mobile sensors
-// - 30 FPS fluid real-time motion capture with natural exposure in darker rooms
+// Starts with 640x480 @ 30fps for instantaneous fluid connection; resolution upgrades
+// are driven dynamically by the VideoQualityController when network conditions allow.
 const OPTIMAL_VIDEO_CONSTRAINTS: MediaStreamConstraints = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-    sampleRate: 48000,
-  },
+  audio: { ...VOIP_AUDIO },
   video: {
     facingMode: 'user',
-    width: { min: 640, ideal: 1280 },
-    height: { min: 480, ideal: 720 },
-    frameRate: { min: 24, ideal: 30, max: 30 },
+    width: { ideal: 640, max: 1280 },
+    height: { ideal: 480, max: 720 },
+    frameRate: { ideal: 30, max: 30 },
   },
 };
 
 const FALLBACK_VIDEO_CONSTRAINTS: MediaStreamConstraints = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-    sampleRate: 48000,
-  },
+  audio: { ...VOIP_AUDIO },
   video: {
     facingMode: 'user',
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    frameRate: { ideal: 30 },
+    width: { ideal: 480 },
+    height: { ideal: 360 },
+    frameRate: { ideal: 24 },
   },
 };
 
@@ -167,6 +158,11 @@ class CallManager {
   private pendingOfferSdp: RTCSessionDescriptionInit | null = null;
   private wakeLock: any = null;
   private currentVideoQuality: VideoQualityLevel = 'auto';
+
+  // Adaptive Quality Controller & Async Race Prevention
+  private autoResetTimer: NodeJS.Timeout | null = null;
+  private qualityController: VideoQualityController | null = null;
+  private callGeneration = 0;
 
   // Firestore Realtime Unsubscribers
   private incomingCallsUnsub: Unsubscribe | null = null;
@@ -285,6 +281,11 @@ class CallManager {
   public onCoupleEvent(listener: CoupleEventListener): () => void {
     this.coupleListeners.add(listener);
     return () => this.coupleListeners.delete(listener);
+  }
+
+  // Send fast Cineminha sync payload over WebSocket channel
+  public sendCineminhaSync(payload: any) {
+    this.sendSignal('cineminha:sync', payload);
   }
 
   // Register current authenticated user for real-time signaling
@@ -455,6 +456,25 @@ class CallManager {
 
   // Handle incoming signaling messages from backend
   private async handleSignalingMessage(type: string, payload: any) {
+    const CALL_SCOPED = new Set([
+      'call:accepted',
+      'call:connected',
+      'call:offer',
+      'call:answer',
+      'call:ice_candidate',
+      'call:rejected',
+      'call:cancelled',
+      'call:timeout',
+      'call:ended',
+      'call:partner_muted',
+      'call:partner_camera_state',
+      'call:request_keyframe',
+    ]);
+    if (CALL_SCOPED.has(type) && payload?.callId && this.session.callId && payload.callId !== this.session.callId) {
+      console.log('[CallManager] Evento ignorado (callId antigo):', type, payload.callId);
+      return;
+    }
+
     switch (type) {
       case 'registered':
         console.log(`[WS REGISTER]\nuserId=${this.currentUser?.id}\nregistered=true`);
@@ -469,6 +489,9 @@ class CallManager {
       case 'chat:message':
       case 'arena:updated':
       case 'user:updated':
+      case 'cineminha:sync':
+      case 'cineminha:started':
+      case 'cineminha:ended':
         console.log(`[CallManager] Received real-time sync event: ${type}`, payload);
         this.coupleListeners.forEach((listener) => {
           try {
@@ -495,6 +518,9 @@ class CallManager {
         if (this.ringingTimeoutTimer) {
           clearTimeout(this.ringingTimeoutTimer);
           this.ringingTimeoutTimer = null;
+        }
+        if (payload?.callType) {
+          this.session.callType = payload.callType;
         }
         this.updateState({ state: 'CONNECTING' });
         if (this.session.isOutgoing) {
@@ -526,11 +552,6 @@ class CallManager {
         } else {
           await this.handleReceivedOffer(payload.sdp);
         }
-        break;
-
-      case 'call:request_keyframe':
-        console.log('[CallManager] Partner requested immediate keyframe, triggering encoder update.');
-        this.applySenderOptimizations();
         break;
 
       case 'call:answer':
@@ -673,6 +694,12 @@ class CallManager {
     if (!partner || !partner.id) {
       this.notifyError('Nenhum parceiro(a) vinculado.');
       return false;
+    }
+
+    // Clean up any stale media or prior call state
+    if (this.session.state !== 'IDLE') {
+      this.cleanupMediaAndPeer();
+      this.resetToIdle();
     }
 
     const audioEl = this.initAudioElement();
@@ -1240,18 +1267,18 @@ class CallManager {
     }
   }
 
-  // Video transmission is permanently set to high definition 720p 30 FPS fluid mode
+  // Video transmission quality setting
   public async setVideoQuality(_quality?: VideoQualityLevel): Promise<void> {
-    this.currentVideoQuality = 'max';
-    this.updateState({ videoQuality: 'max' });
+    this.currentVideoQuality = 'auto';
+    this.updateState({ videoQuality: 'auto' });
     await this.applySenderOptimizations();
   }
 
   public getVideoQuality(): VideoQualityLevel {
-    return 'max';
+    return this.currentVideoQuality;
   }
 
-  // Configure high-definition, fluid, zero-latency sender parameters (WhatsApp/FaceTime quality)
+  // Configure high-definition, fluid, zero-latency sender parameters (WhatsApp/Google Meet quality standard)
   private async applySenderOptimizations() {
     if (!this.peerConnection) return;
     try {
@@ -1265,13 +1292,14 @@ class CallManager {
             params.encodings = [{}];
           }
 
-          // Full 720p HD lock without downscaling
-          // degradationPreference 'maintain-resolution' ensures that movements never cause blurry macroblocks/pixelation
-          params.encodings[0].scaleResolutionDownBy = 1.0;
-          params.encodings[0].maxBitrate = 4_500_000; // 4.5 Mbps
-          params.encodings[0].maxFramerate = 30;
-          params.encodings[0].networkPriority = 'high';
-          params.degradationPreference = 'maintain-resolution';
+          const stepIndex = this.qualityController ? this.qualityController.getCurrentStepIndex() : START_STEP;
+          const step = QUALITY_STEPS[stepIndex];
+
+          params.encodings[0].scaleResolutionDownBy = step.scale;
+          params.encodings[0].maxBitrate = step.maxBitrate;
+          params.encodings[0].maxFramerate = step.maxFramerate;
+          params.encodings[0].networkPriority = 'low'; // áudio tem prioridade
+          params.degradationPreference = 'maintain-framerate'; // fluidez > resolução
 
           await sender.setParameters(params).catch((e) => {
             console.warn('[CallManager] Could not set video sender parameters:', e);
@@ -1289,6 +1317,7 @@ class CallManager {
             params.encodings = [{}];
           }
           params.encodings[0].maxBitrate = 32_000; // 32 kbps HD voice
+          params.encodings[0].networkPriority = 'high';
 
           await sender.setParameters(params).catch((e) => {
             console.warn('[CallManager] Could not set audio sender parameters:', e);
@@ -1300,7 +1329,7 @@ class CallManager {
     }
   }
 
-  // Configure low-latency playback on audio receiver without disrupting video jitter buffer
+  // Configure low-latency playback on audio/video receiver without buffer accumulation
   private applyReceiverOptimizations() {
     if (!this.peerConnection) return;
     try {
@@ -1312,6 +1341,13 @@ class CallManager {
           if ('playoutDelayHint' in receiver) {
             try {
               (receiver as any).playoutDelayHint = 0;
+            } catch (e) {}
+          }
+        } else if (receiver.track.kind === 'video') {
+          if ('playoutDelayHint' in receiver) {
+            try {
+              // Playout delay hint of 0.1s for smooth rendering without jitter accumulation
+              (receiver as any).playoutDelayHint = 0.1;
             } catch (e) {}
           }
         }
@@ -1452,6 +1488,10 @@ class CallManager {
     pc.onconnectionstatechange = () => {
       console.log('[CallManager] RTCPeerConnection connectionState:', pc.connectionState);
       if (pc.connectionState === 'connected') {
+        if (this.session.callType === 'video' && !this.qualityController) {
+          this.qualityController = new VideoQualityController(pc, () => this.session.callId);
+          this.qualityController.start();
+        }
         this.applySenderOptimizations();
         this.applyReceiverOptimizations();
         this.handleCallConnected();
@@ -1470,6 +1510,10 @@ class CallManager {
     pc.oniceconnectionstatechange = () => {
       console.log('[CallManager] RTCPeerConnection iceConnectionState:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        if (this.session.callType === 'video' && !this.qualityController) {
+          this.qualityController = new VideoQualityController(pc, () => this.session.callId);
+          this.qualityController.start();
+        }
         this.applySenderOptimizations();
         this.applyReceiverOptimizations();
         this.handleCallConnected();
@@ -1501,6 +1545,7 @@ class CallManager {
   }
 
   private async createAndSendOffer() {
+    const gen = this.callGeneration;
     try {
       let pc = this.peerConnection;
       if (!pc || pc.signalingState === 'closed') {
@@ -1520,10 +1565,15 @@ class CallManager {
         offerToReceiveVideo: isVideo,
       });
 
+      if (gen !== this.callGeneration) return;
+
       // Enhance SDP with WhatsApp-grade HD Opus audio settings and low-latency video settings
       const enhancedSdp = optimizeWebRtcSdp(offer.sdp || '', isVideo);
       const enhancedOffer: RTCSessionDescriptionInit = { type: offer.type, sdp: enhancedSdp };
       await pc.setLocalDescription(enhancedOffer);
+
+      if (gen !== this.callGeneration) return;
+
       await this.applySenderOptimizations();
 
       const sdpPayload = { type: enhancedOffer.type, sdp: enhancedOffer.sdp };
@@ -1549,6 +1599,7 @@ class CallManager {
   }
 
   private async handleReceivedOffer(sdp: RTCSessionDescriptionInit) {
+    const gen = this.callGeneration;
     try {
       let pc = this.peerConnection;
       if (!pc || pc.signalingState === 'closed') {
@@ -1563,14 +1614,21 @@ class CallManager {
       }
 
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      if (gen !== this.callGeneration) return;
+
       await this.processPendingIceCandidates();
+      if (gen !== this.callGeneration) return;
 
       const isVideo = this.session.callType === 'video';
       const answer = await pc.createAnswer();
+      if (gen !== this.callGeneration) return;
+
       // Enhance SDP with WhatsApp-grade HD Opus audio settings and low-latency video settings
       const enhancedSdp = optimizeWebRtcSdp(answer.sdp || '', isVideo);
       const enhancedAnswer: RTCSessionDescriptionInit = { type: answer.type, sdp: enhancedSdp };
       await pc.setLocalDescription(enhancedAnswer);
+      if (gen !== this.callGeneration) return;
+
       await this.applySenderOptimizations();
 
       const answerPayload = { type: enhancedAnswer.type, sdp: enhancedAnswer.sdp };
@@ -1602,11 +1660,16 @@ class CallManager {
   }
 
   private async handleReceivedAnswer(sdp: RTCSessionDescriptionInit) {
+    const gen = this.callGeneration;
     try {
       if (this.peerConnection && this.peerConnection.signalingState !== 'closed') {
         if (this.peerConnection.signalingState === 'have-local-offer') {
           await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+          if (gen !== this.callGeneration) return;
+
           await this.processPendingIceCandidates();
+          if (gen !== this.callGeneration) return;
+
           await this.applySenderOptimizations();
           this.applyReceiverOptimizations();
 
@@ -1645,6 +1708,10 @@ class CallManager {
       this.ringingTimeoutTimer = null;
     }
     this.requestWakeLock();
+    if (this.session.callType === 'video' && this.peerConnection && !this.qualityController) {
+      this.qualityController = new VideoQualityController(this.peerConnection, () => this.session.callId);
+      this.qualityController.start();
+    }
     this.applySenderOptimizations();
     this.applyReceiverOptimizations();
     this.updateState({ state: 'CONNECTED' });
@@ -1689,8 +1756,19 @@ class CallManager {
   }
 
   private cleanupMediaAndPeer() {
+    this.callGeneration += 1;
+    if (this.qualityController) {
+      this.qualityController.stop();
+      this.qualityController = null;
+    }
+    this.pendingIceCandidates = [];
     this.stopDurationTimer();
     this.releaseWakeLock();
+
+    if (this.autoResetTimer) {
+      clearTimeout(this.autoResetTimer);
+      this.autoResetTimer = null;
+    }
 
     if (this.ringingTimeoutTimer) {
       clearTimeout(this.ringingTimeoutTimer);
@@ -1710,7 +1788,11 @@ class CallManager {
     this.pendingOfferSdp = null;
 
     if (this.localStream) {
-      this.localStream.getTracks().forEach((t) => t.stop());
+      this.localStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch (e) {}
+      });
       this.localStream = null;
     }
     this.remoteStream = null;
@@ -1718,6 +1800,15 @@ class CallManager {
 
     if (this.peerConnection) {
       try {
+        this.peerConnection.ontrack = null;
+        this.peerConnection.onicecandidate = null;
+        this.peerConnection.onconnectionstatechange = null;
+        this.peerConnection.oniceconnectionstatechange = null;
+        this.peerConnection.getSenders().forEach((s) => {
+          try {
+            s.track?.stop();
+          } catch (e) {}
+        });
         this.peerConnection.close();
       } catch (e) {}
       this.peerConnection = null;
@@ -1731,8 +1822,13 @@ class CallManager {
     }
   }
 
-  private scheduleAutoReset(delayMs = 2000) {
-    setTimeout(() => {
+  private scheduleAutoReset(delayMs = 1200) {
+    if (this.autoResetTimer) {
+      clearTimeout(this.autoResetTimer);
+      this.autoResetTimer = null;
+    }
+    this.autoResetTimer = setTimeout(() => {
+      this.autoResetTimer = null;
       if (
         this.session.state === 'ENDED' ||
         this.session.state === 'REJECTED' ||

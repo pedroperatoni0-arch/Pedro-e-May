@@ -142,8 +142,16 @@ export class CallSignalingServer {
               this.handleCameraState(ws, payload);
               break;
 
+            case 'call:request_keyframe':
+              this.handleRequestKeyframe(ws, payload);
+              break;
+
             case 'call:audio_data':
               this.handleAudioData(ws, payload);
+              break;
+
+            case 'cineminha:sync':
+              this.handleCineminhaSync(ws, payload);
               break;
 
             default:
@@ -417,9 +425,9 @@ export class CallSignalingServer {
 
     console.log(`[CALL] Call accepted for session: ${callId}, caller=${targetCallerId}, callee=${calleeId}`);
     if (targetCallerId) {
-      this.sendTo(targetCallerId, 'call:accepted', { callId, calleeId });
+      this.sendTo(targetCallerId, 'call:accepted', { callId, calleeId, callType: call?.callType });
     }
-    this.sendTo(calleeId, 'call:accepted', { callId, callerId: targetCallerId });
+    this.sendTo(calleeId, 'call:accepted', { callId, callerId: targetCallerId, callType: call?.callType });
   }
 
   private handleCallReject(ws: WebSocket, payload: { callId: string; calleeId?: string; callerId?: string; userId?: string; reason?: string }) {
@@ -569,6 +577,30 @@ export class CallSignalingServer {
 
     const otherPeerId = call.callerId === userId ? call.calleeId : call.callerId;
     this.sendTo(otherPeerId, 'call:partner_camera_state', { callId, isCameraOff });
+  }
+
+  private handleRequestKeyframe(ws: WebSocket, payload: { callId: string; userId?: string; targetUserId?: string }) {
+    const call = this.activeCalls.get(payload.callId);
+    const target = payload.targetUserId
+      || (call ? (call.callerId === payload.userId ? call.calleeId : call.callerId) : undefined);
+    if (target) {
+      this.sendTo(target, 'call:request_keyframe', { callId: payload.callId });
+    }
+  }
+
+  private handleCineminhaSync(ws: WebSocket, payload: any) {
+    if (!payload?.userId) return;
+    const client = this.clients.get(payload.userId);
+    let partnerId = client?.partnerId;
+    if (!partnerId && payload.partnerId) {
+      partnerId = payload.partnerId;
+    }
+    if (partnerId) {
+      this.sendTo(partnerId, 'cineminha:sync', {
+        ...payload,
+        serverTimestamp: Date.now(),
+      });
+    }
   }
 
   private handleDisconnect(userId: string, ws?: WebSocket) {

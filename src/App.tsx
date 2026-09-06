@@ -16,6 +16,7 @@ import { ProfileTab } from './components/profile/ProfileTab';
 import { LevelUpModal } from './components/modals/LevelUpModal';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { RealVoiceCallModal } from './components/call/RealVoiceCallModal';
+import { CineminhaScreen } from './components/cineminha/CineminhaScreen';
 import { Heart } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -30,6 +31,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
   const [realCallSession, setRealCallSession] = useState<RealCallSession>(callManager.getSession());
+  const [isCineminhaOpen, setIsCineminhaOpen] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
     setNotification(msg);
@@ -170,6 +172,11 @@ export default function App() {
         setMessages(prev =>
           prev.map(m => (m.senderId === currentUser?.id ? { ...m, read: true } : m))
         );
+      } else if (event.type === 'cineminha:started') {
+        soundManager.playLevelUp();
+        showToast(`🎬 ${event.payload?.starterName || 'Seu amor'} iniciou o Cineminha! Toque no card para entrar.`);
+      } else if (event.type === 'cineminha:ended') {
+        showToast('A sessão de Cineminha do casal foi finalizada.');
       }
     });
 
@@ -635,6 +642,8 @@ export default function App() {
             onNavigateToChallenges={() => setActiveTab('challenges')}
             onNavigateToProfile={() => setActiveTab('profile')}
             onNavigateToChat={() => setActiveTab('chat')}
+            onOpenCineminha={() => setIsCineminhaOpen(true)}
+            showToast={showToast}
           />
         )}
 
@@ -687,13 +696,27 @@ export default function App() {
         )}
       </div>
 
-      {/* Floating Bottom Navigation (Hidden inside private dedicated conversation screen) */}
-      {activeTab !== 'chat' && (
+      {/* Floating Bottom Navigation (Hidden inside private dedicated conversation screen and Cineminha) */}
+      {!isCineminhaOpen && activeTab !== 'chat' && (
         <BottomNavigation
           activeTab={activeTab}
           onTabChange={setActiveTab}
           unreadMessagesCount={(messages || []).filter(m => m && !m.read && currentUser && m.senderId !== currentUser.id).length}
         />
+      )}
+
+      {/* Dedicated Immersive Cineminha Watch Party Screen */}
+      {isCineminhaOpen && (
+        <div className="absolute inset-0 z-40 bg-slate-950 flex flex-col overflow-hidden">
+          <CineminhaScreen
+            currentUser={currentUser}
+            partner={partner}
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            onClose={() => setIsCineminhaOpen(false)}
+            showToast={showToast}
+          />
+        </div>
       )}
     </MobileShell>
   );
