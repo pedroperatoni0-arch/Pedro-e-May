@@ -60,27 +60,29 @@ export async function handleWebProxy(req: Request, res: Response) {
     return res.status(400).send('URL é obrigatória.');
   }
 
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(targetUrl);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      return res.status(400).send('Protocolo inválido. Apenas HTTP e HTTPS são suportados.');
-    }
-  } catch {
-    return res.status(400).send('URL inválida.');
-  }
-
   try {
     let refHeader = (req.query.ref as string) || '';
     if (!refHeader && req.headers.referer) {
       try {
         const refUrl = new URL(req.headers.referer);
         const innerUrl = refUrl.searchParams.get('url');
-        refHeader = innerUrl || parsedUrl.origin + '/';
+        refHeader = innerUrl || '';
       } catch {
-        refHeader = parsedUrl.origin + '/';
+        refHeader = '';
       }
     }
+
+    let parsedUrl: URL;
+    try {
+      const baseUrl = refHeader ? new URL(refHeader) : undefined;
+      parsedUrl = new URL(targetUrl, baseUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return res.status(400).send('Protocolo inválido. Apenas HTTP e HTTPS são suportados.');
+      }
+    } catch {
+      return res.status(400).send('URL inválida.');
+    }
+
     if (!refHeader) {
       refHeader = parsedUrl.origin + '/';
     }

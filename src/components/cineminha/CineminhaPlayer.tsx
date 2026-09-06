@@ -260,7 +260,15 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
       return session.media.url;
     }
     // Web source: use playerUrl if available (e.g. plenoflu, vaiquecol), otherwise page url
-    const target = session.media.playerUrl || session.media.url;
+    const rawTarget = session.media.playerUrl || session.media.url;
+    let target = rawTarget;
+    if (!/^[a-z][a-z\d+.-]*:/i.test(rawTarget)) {
+      try {
+        target = new URL(rawTarget, session.media.url).toString();
+      } catch {
+        target = rawTarget;
+      }
+    }
     if (target.startsWith('/api/cineminha/web-proxy')) {
       return target;
     }
