@@ -5,7 +5,6 @@ import { createServer as createViteServer } from 'vite';
 import { CallSignalingServer } from './server/callSignaling';
 import { userStore } from './server/userStore';
 import { dataStore } from './server/dataStore';
-import { handleWebProxy } from './server/webProxy';
 
 async function startServer() {
   const app = express();
@@ -379,7 +378,7 @@ async function startServer() {
     const freshUser = userStore.findById(user.id);
     const partnerId = freshUser?.partnerId && freshUser.partnerStatus === 'connected' ? freshUser.partnerId : null;
     const coupleId = getCoupleId(user.id, partnerId);
-    const session = dataStore.getWatchSession(coupleId);
+    const session = dataStore.joinWatchSession(coupleId, user.id, user.username);
     res.json({ success: true, session });
   });
 
@@ -476,9 +475,6 @@ async function startServer() {
 
     res.json({ success: true, session });
   });
-
-  // 21. Cineminha In-App Web Browser Proxy (strips X-Frame-Options/CSP for watch party navigation)
-  app.all('/api/cineminha/web-proxy', handleWebProxy);
 
   // ICE / STUN & TURN Servers Configuration
   app.get('/api/webrtc/ice-servers', (req, res) => {

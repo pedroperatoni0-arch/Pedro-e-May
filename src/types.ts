@@ -1,3 +1,5 @@
+import type { PlaybackCapabilities } from './services/cineminha/mediaSource';
+
 export type DayOfWeek = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Domingo, 1=Segunda ... 6=Sábado
 
 export type TaskStatus = 'pending' | 'completed' | 'failed';
@@ -181,6 +183,7 @@ export interface CineminhaMedia {
   title: string;
   url: string;
   playerUrl?: string;
+  playbackCapabilities?: PlaybackCapabilities;
   driveFileId?: string;
   poster?: string;
   duration?: number;
@@ -200,6 +203,8 @@ export interface CoupleWatchSession {
   coupleId: string;
   hostUserId: string;
   hostUsername: string;
+  participantUserId?: string;
+  participantUsername?: string;
   media: CineminhaMedia | null;
   playback: CineminhaPlayback;
   quality: CineminhaQuality;

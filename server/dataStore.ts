@@ -441,17 +441,42 @@ class DataStore {
 
   public startWatchSession(coupleId: string, hostUserId: string, hostUsername: string): CoupleWatchSession {
     const existing = this.getWatchSession(coupleId);
+    const hasActiveOwner = existing.active && Boolean(existing.hostUserId);
     const updated: CoupleWatchSession = {
       ...existing,
       active: true,
-      hostUserId,
-      hostUsername,
+      hostUserId: hasActiveOwner ? existing.hostUserId : hostUserId,
+      hostUsername: hasActiveOwner ? existing.hostUsername : hostUsername,
+      participantUserId:
+        hasActiveOwner && existing.hostUserId !== hostUserId
+          ? hostUserId
+          : undefined,
+      participantUsername:
+        hasActiveOwner && existing.hostUserId !== hostUserId
+          ? hostUsername
+          : undefined,
       updatedAt: Date.now(),
       playback: {
         ...existing.playback,
         serverTimestamp: Date.now(),
         updatedAt: Date.now(),
       },
+    };
+    this.watchSessions.set(coupleId, updated);
+    return updated;
+  }
+
+  public joinWatchSession(coupleId: string, userId: string, username: string): CoupleWatchSession {
+    const existing = this.getWatchSession(coupleId);
+    if (!existing.active || !existing.hostUserId || existing.hostUserId === userId || existing.participantUserId) {
+      return existing;
+    }
+
+    const updated: CoupleWatchSession = {
+      ...existing,
+      participantUserId: userId,
+      participantUsername: username,
+      updatedAt: Date.now(),
     };
     this.watchSessions.set(coupleId, updated);
     return updated;

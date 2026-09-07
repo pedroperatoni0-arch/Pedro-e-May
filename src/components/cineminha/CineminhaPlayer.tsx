@@ -259,6 +259,9 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
     if (session.media.sourceType === 'drive') {
       return session.media.url;
     }
+    if (session.media.playbackCapabilities && !session.media.playbackCapabilities.canPlay) {
+      return session.media.url;
+    }
     // Web source: use playerUrl if available (e.g. plenoflu, vaiquecol), otherwise page url
     const rawTarget = session.media.playerUrl || session.media.url;
     const isProxyTarget = rawTarget.startsWith('/api/cineminha/web-proxy') || (() => {
@@ -320,10 +323,10 @@ export const CineminhaPlayer: React.FC<CineminhaPlayerProps> = ({
     showToast('Recarregando player do filme...');
   };
 
-  const isEmbedOrDrive =
-    session.media?.sourceType === 'drive' ||
-    session.media?.sourceType === 'site' ||
-    Boolean(session.media?.url && !session.media.url.match(/\.(mp4|webm|ogg)(\?.*)?$/i));
+  const isDirectVideo =
+    Boolean(session.media?.playbackCapabilities?.canPlay) ||
+    Boolean(session.media?.url && session.media.url.match(/\.(mp4|webm|ogg)(\?.*)?$/i));
+  const isEmbedOrDrive = !isDirectVideo;
 
   return (
     <div

@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { ArrowLeft, ArrowRight, X, Search, RotateCw, Film } from 'lucide-react';
 import { CineminhaMedia } from '../../types';
+import { getBrowserAdapter } from '../../services/cineminha/browserAdapter';
+import { EXTERNAL_PLAYER_CAPABILITIES } from '../../services/cineminha/mediaSource';
 
 interface CineminhaWebBrowserProps {
   isOpen: boolean;
@@ -18,25 +20,18 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
   const [currentUrl, setCurrentUrl] = useState<string>('');
   const [pageTitle, setPageTitle] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [browserStatus, setBrowserStatus] = useState<string | null>(null);
+  const [mediaReferenceUrl, setMediaReferenceUrl] = useState<string>('');
 
   // History stack with pointer for Back and Forward navigation
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
-
-  // Detected video stream or player embed if available
-  const [detectedVideoUrl, setDetectedVideoUrl] = useState<string | null>(null);
-  const [detectedPlayerUrl, setDetectedPlayerUrl] = useState<string | null>(null);
-
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   const navigateTo = useCallback((destinationUrl: string, addToHistory = true) => {
     setCurrentUrl(destinationUrl);
     setSearchInput(destinationUrl);
     setIsLoading(true);
     setHasNavigated(true);
-    setDetectedVideoUrl(null);
-    setDetectedPlayerUrl(null);
-
     if (addToHistory) {
       setHistory((prev) => {
         const next = prev.slice(0, historyIndex + 1);
@@ -47,7 +42,7 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
     }
   }, [historyIndex]);
 
-  const handleGoToUrl = useCallback((target: string) => {
+  const handleGoToUrl = useCallback(async (target: string) => {
     const raw = target.trim();
     if (!raw) return;
 
@@ -63,42 +58,15 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
 
     setPageTitle(raw);
     navigateTo(destinationUrl, true);
+    const result = await getBrowserAdapter().open(destinationUrl);
+    setBrowserStatus(
+      result.opened
+        ? result.mode === 'custom-tab'
+          ? 'Página aberta no navegador do Android. Volte ao Cineminha para informar uma referência autorizada de mídia.'
+          : 'Página aberta no navegador. Volte ao Cineminha para informar uma referência autorizada de mídia.'
+        : result.reason || 'Não foi possível abrir a página.',
+    );
   }, [navigateTo]);
-
-  // Listen for messages from web proxy script (postMessage)
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data && typeof event.data === 'object') {
-        if (event.data.type === 'cineminha:page-loaded') {
-          if (event.data.url) {
-            setCurrentUrl(event.data.url);
-            setSearchInput(event.data.url);
-          }
-          if (event.data.title) {
-            setPageTitle(event.data.title);
-          }
-          setIsLoading(false);
-        } else if (event.data.type === 'cineminha:navigate') {
-          if (event.data.url) {
-            handleGoToUrl(event.data.url);
-          }
-        } else if (event.data.type === 'cineminha:player-detected') {
-          if (event.data.playerUrl) {
-            console.log('[CineminhaBrowser] Player detected:', event.data.playerUrl);
-            setDetectedPlayerUrl(event.data.playerUrl);
-          }
-        } else if (event.data.type === 'cineminha:video-detected') {
-          if (event.data.videoUrl) {
-            console.log('[CineminhaBrowser] Direct video stream detected:', event.data.videoUrl);
-            setDetectedVideoUrl(event.data.videoUrl);
-          }
-        }
-      }
-    };
-
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [handleGoToUrl]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,18 +101,23 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
   const handleReload = () => {
     if (currentUrl) {
       setIsLoading(true);
-      if (iframeRef.current) {
-        iframeRef.current.src = `/api/cineminha/web-proxy?url=${encodeURIComponent(currentUrl)}&_t=${Date.now()}`;
-      }
+      void getBrowserAdapter().open(currentUrl).then((result) => {
+        setIsLoading(false);
+        if (!result.opened) setBrowserStatus(result.reason || 'Não foi possível reabrir a página.');
+      });
     }
   };
 
   const handleConfirmMedia = () => {
+    const referenceUrl = mediaReferenceUrl.trim();
+    if (!referenceUrl) return;
+
     onSelectMedia({
       sourceType: 'site',
       title: pageTitle || 'Filme Web',
-      url: currentUrl,
-      playerUrl: detectedVideoUrl || detectedPlayerUrl || undefined,
+      url: referenceUrl,
+      playerUrl: undefined,
+      playbackCapabilities: EXTERNAL_PLAYER_CAPABILITIES,
     });
     onClose();
   };
@@ -153,11 +126,6 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
 
   const canGoBack = hasNavigated;
   const canGoForward = historyIndex >= 0 && historyIndex < history.length - 1;
-
-  // Construct proxied URL to bypass X-Frame-Options and Content-Security-Policy
-  const proxiedSrc = currentUrl
-    ? `/api/cineminha/web-proxy?url=${encodeURIComponent(currentUrl)}`
-    : '';
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col overflow-hidden text-white animate-fade-in">
@@ -283,35 +251,36 @@ export const CineminhaWebBrowser: React.FC<CineminhaWebBrowserProps> = ({
             <div className="absolute top-0 left-0 right-0 h-0.5 bg-rose-500 animate-pulse z-20" />
           )}
 
-          {/* Embedded Web View via Proxy */}
-          <iframe
-            ref={iframeRef}
-            src={proxiedSrc}
-            title={pageTitle || 'Navegador Cineminha'}
-            onLoad={() => setIsLoading(false)}
-            sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups allow-popups-to-escape-sandbox allow-modals"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-            className="w-full flex-1 border-0 bg-white"
-          />
+          <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center bg-slate-950">
+            <div className="max-w-md space-y-2">
+              <p className="text-sm font-bold text-white">Navegação Web aberta</p>
+              <p className="text-xs text-slate-400">
+                O site está sendo executado pelo navegador da plataforma. Para adicionar uma mídia à sala, informe uma referência autorizada do player.
+              </p>
+              {browserStatus && <p className="text-[11px] text-emerald-300">{browserStatus}</p>}
+            </div>
+            <input
+              type="url"
+              value={mediaReferenceUrl}
+              onChange={(event) => setMediaReferenceUrl(event.target.value)}
+              placeholder="Cole aqui a URL autorizada da mídia ou player"
+              className="w-full max-w-md px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+            />
+          </div>
 
           {/* Bottom Bar: Action to Select and Return to Cineminha */}
           <div className="p-3 bg-slate-900 border-t border-slate-800 flex items-center justify-between gap-3 shrink-0">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <p className="text-xs font-bold text-white truncate">{pageTitle || 'Página Web'}</p>
-                {(detectedVideoUrl || detectedPlayerUrl) && (
-                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-extrabold px-1.5 py-0.5 rounded-full flex items-center gap-1 shrink-0 animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                    <span>Player Pronto</span>
-                  </span>
-                )}
               </div>
               <p className="text-[10px] text-slate-400 truncate">{currentUrl}</p>
             </div>
 
             <button
               onClick={handleConfirmMedia}
-              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white text-xs font-bold transition flex items-center gap-2 shadow-lg shadow-rose-600/25 active:scale-95 cursor-pointer shrink-0"
+              disabled={!mediaReferenceUrl.trim()}
+              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 disabled:opacity-50 disabled:pointer-events-none text-white text-xs font-bold transition flex items-center gap-2 shadow-lg shadow-rose-600/25 active:scale-95 cursor-pointer shrink-0"
             >
               <Film className="w-4 h-4" />
               <span>Incorporar ao Cineminha</span>
